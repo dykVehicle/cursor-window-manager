@@ -1,0 +1,159 @@
+# Windows 窗口嵌入脚本
+# 使用 Windows API 将窗口嵌入到另一个窗口中
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$ChildWindowTitle,
+    
+    [Parameter(Mandatory=$true)]
+    [long]$ParentHwnd,
+    
+    [Parameter(Mandatory=$true)]
+    [int]$X,
+    
+    [Parameter(Mandatory=$true)]
+    [int]$Y,
+    
+    [Parameter(Mandatory=$true)]
+    [int]$Width,
+    
+    [Parameter(Mandatory=$true)]
+    [int]$Height
+)
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class WindowAPI {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    
+    public const int GWL_STYLE = -16;
+    public const int GWL_EXSTYLE = -20;
+    public const int WS_CHILD = 0x40000000;
+    public const int WS_VISIBLE = 0x10000000;
+    public const int WS_POPUP = unchecked((int)0x80000000);
+    public const int WS_CAPTION = 0x00C00000;
+    public const int WS_THICKFRAME = 0x00040000;
+    public const int WS_BORDER = 0x00800000;
+    public const int WS_SYSMENU = 0x00080000;
+    public const int WS_MINIMIZEBOX = 0x00020000;
+    public const int WS_MAXIMIZEBOX = 0x00010000;
+    public const int WS_EX_APPWINDOW = 0x00040000;
+    public const uint SWP_FRAMECHANGED = 0x0020;
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const int SW_SHOW = 5;
+}
+"@
+
+# 查找包含指定标题的窗口
+function Find-WindowByTitle {
+    param([string]$TitleContains)
+    
+    $foundHwnd = [IntPtr]::Zero
+    
+    $callback = {
+        param([IntPtr]$hwnd, [IntPtr]$lParam)
+        
+        if ([WindowAPI]::IsWindowVisible($hwnd)) {
+            $sb = New-Object System.Text.StringBuilder 256
+            [WindowAPI]::GetWindowText($hwnd, $sb, 256) | Out-Null
+            $title = $sb.ToString()
+            
+            if ($title -like "*$TitleContains*") {
+                $script:foundHwnd = $hwnd
+                return $false  # 停止枚举
+            }
+        }
+        return $true  # 继续枚举
+    }
+    
+    $delegate = [WindowAPI+EnumWindowsProc]$callback
+    [WindowAPI]::EnumWindows($delegate, [IntPtr]::Zero) | Out-Null
+    
+    return $script:foundHwnd
+}
+
+# 主逻辑
+try {
+    Write-Host "Looking for window: $ChildWindowTitle"
+    
+    # 查找 Cursor 窗口
+    $childHwnd = Find-WindowByTitle -TitleContains $ChildWindowTitle
+    
+    if ($childHwnd -eq [IntPtr]::Zero) {
+        Write-Host "ERROR: Window not found"
+        exit 1
+    }
+    
+    Write-Host "Found window: $childHwnd"
+    Write-Host "Parent HWND: $ParentHwnd"
+    Write-Host "Bounds: X=$X, Y=$Y, W=$Width, H=$Height"
+    
+    $parentPtr = [IntPtr]$ParentHwnd
+    
+    # 获取当前窗口样式
+    $currentStyle = [WindowAPI]::GetWindowLong($childHwnd, [WindowAPI]::GWL_STYLE)
+    Write-Host "Current style: $currentStyle"
+    
+    # 移除边框样式，添加子窗口样式
+    $newStyle = ($currentStyle -band (-bnot ([WindowAPI]::WS_POPUP -bor [WindowAPI]::WS_CAPTION -bor [WindowAPI]::WS_THICKFRAME -bor [WindowAPI]::WS_BORDER -bor [WindowAPI]::WS_SYSMENU -bor [WindowAPI]::WS_MINIMIZEBOX -bor [WindowAPI]::WS_MAXIMIZEBOX))) -bor [WindowAPI]::WS_CHILD -bor [WindowAPI]::WS_VISIBLE
+    
+    # 设置新样式
+    [WindowAPI]::SetWindowLong($childHwnd, [WindowAPI]::GWL_STYLE, $newStyle) | Out-Null
+    Write-Host "New style set: $newStyle"
+    
+    # 设置父窗口
+    $result = [WindowAPI]::SetParent($childHwnd, $parentPtr)
+    Write-Host "SetParent result: $result"
+    
+    # 移动窗口
+    [WindowAPI]::MoveWindow($childHwnd, $X, $Y, $Width, $Height, $true) | Out-Null
+    Write-Host "Window moved"
+    
+    # 应用更改
+    [WindowAPI]::SetWindowPos($childHwnd, [IntPtr]::Zero, $X, $Y, $Width, $Height, [WindowAPI]::SWP_FRAMECHANGED -bor [WindowAPI]::SWP_NOZORDER) | Out-Null
+    
+    # 显示窗口
+    [WindowAPI]::ShowWindow($childHwnd, [WindowAPI]::SW_SHOW) | Out-Null
+    
+    Write-Host "SUCCESS: Window embedded"
+    Write-Output $childHwnd.ToInt64()
+    exit 0
+}
+catch {
+    Write-Host "ERROR: $($_.Exception.Message)"
+    exit 1
+}
