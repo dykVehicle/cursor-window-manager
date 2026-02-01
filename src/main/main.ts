@@ -138,18 +138,36 @@ async function processEmbedQueue() {
         const display = screen.getDisplayMatching(mainWindow.getBounds());
         const scaleFactor = display.scaleFactor || 1;
         
-        // 计算 DIP 坐标并转换为物理像素
-        const dipX = contentBounds.x + task.paneBounds.x;
-        const dipY = contentBounds.y + task.paneBounds.y;
-        const screenPoint = screen.dipToScreenPoint({ x: dipX, y: dipY });
+        // 计算 pane 左上角和右下角的 DIP 坐标
+        const dipTopLeft = { 
+          x: contentBounds.x + task.paneBounds.x, 
+          y: contentBounds.y + task.paneBounds.y 
+        };
+        let dipBottomRight = { 
+          x: contentBounds.x + task.paneBounds.x + task.paneBounds.width, 
+          y: contentBounds.y + task.paneBounds.y + task.paneBounds.height 
+        };
+        
+        // 确保 pane 右下角不超出主窗口内容区域，预留边框宽度
+        const borderWidth = 3;
+        const contentRight = contentBounds.x + contentBounds.width - borderWidth;
+        const contentBottom = contentBounds.y + contentBounds.height - borderWidth;
+        dipBottomRight = {
+          x: Math.min(dipBottomRight.x, contentRight),
+          y: Math.min(dipBottomRight.y, contentBottom)
+        };
+        
+        // 使用 dipToScreenPoint 统一转换
+        const screenTopLeft = screen.dipToScreenPoint(dipTopLeft);
+        const screenBottomRight = screen.dipToScreenPoint(dipBottomRight);
         
         screenBounds = {
-          x: screenPoint.x,
-          y: screenPoint.y,
-          width: Math.round(task.paneBounds.width * scaleFactor),
-          height: Math.round(task.paneBounds.height * scaleFactor),
+          x: screenTopLeft.x,
+          y: screenTopLeft.y,
+          width: screenBottomRight.x - screenTopLeft.x,
+          height: screenBottomRight.y - screenTopLeft.y,
         };
-        log(`[EmbedQueue] scaleFactor=${scaleFactor}, dip=(${dipX},${dipY}), screen=(${screenBounds.x},${screenBounds.y},${screenBounds.width}x${screenBounds.height})[physical]`);
+        log(`[EmbedQueue] scaleFactor=${scaleFactor}, dip=(${dipTopLeft.x},${dipTopLeft.y})-(${dipBottomRight.x},${dipBottomRight.y}), screen=(${screenBounds.x},${screenBounds.y},${screenBounds.width}x${screenBounds.height})[physical]`);
       }
       
       const result = await embedWindowWithPowerShell('Cursor', task.parentHwndBuffer, screenBounds, existingHwnds, task.targetPid);
@@ -418,24 +436,44 @@ async function resizeEmbeddedWindowWithPowerShell(
   // 获取主窗口客户区在屏幕上的位置（DIP）
   const contentBounds = mainWindow.getContentBounds();
   
-  // 获取主窗口所在显示器的 scaleFactor
+  // 获取主窗口所在显示器的 scaleFactor（仅用于日志）
   const display = screen.getDisplayMatching(mainWindow.getBounds());
   const scaleFactor = display.scaleFactor || 1;
   
-  // 计算 DIP 坐标
-  const dipX = contentBounds.x + bounds.x;
-  const dipY = contentBounds.y + bounds.y;
+  // 计算 pane 左上角和右下角的 DIP 坐标
+  const dipTopLeft = { 
+    x: contentBounds.x + bounds.x, 
+    y: contentBounds.y + bounds.y 
+  };
+  let dipBottomRight = { 
+    x: contentBounds.x + bounds.x + bounds.width, 
+    y: contentBounds.y + bounds.y + bounds.height 
+  };
   
-  // 转换为物理像素坐标（Per-Monitor V2 模式下 SetWindowPos 需要物理像素）
-  const screenPoint = screen.dipToScreenPoint({ x: dipX, y: dipY });
-  const width = Math.round(bounds.width * scaleFactor);
-  const height = Math.round(bounds.height * scaleFactor);
+  // 获取主窗口内容区域边界，预留边框宽度（主程序绿色边框约 2 DIP）
+  const borderWidth = 2;
+  const contentRight = contentBounds.x + contentBounds.width - borderWidth;
+  const contentBottom = contentBounds.y + contentBounds.height - borderWidth;
+  
+  // 确保 pane 右下角不超出主窗口内容区域（裁剪到边框内侧）
+  dipBottomRight = {
+    x: Math.min(dipBottomRight.x, contentRight),
+    y: Math.min(dipBottomRight.y, contentBottom)
+  };
+  
+  // 使用 dipToScreenPoint 统一转换，确保边界精确对齐
+  const screenTopLeft = screen.dipToScreenPoint(dipTopLeft);
+  const screenBottomRight = screen.dipToScreenPoint(dipBottomRight);
+  
+  // 通过两点相减计算精确的物理像素尺寸
+  const width = screenBottomRight.x - screenTopLeft.x;
+  const height = screenBottomRight.y - screenTopLeft.y;
   
   resizeCount++;
-  log(`[Resize] hwnd=${hwnd}, scaleFactor=${scaleFactor}, dip=(${dipX},${dipY}), screen=(${screenPoint.x},${screenPoint.y}), size=(${width}x${height})[physical]`);
+  log(`[Resize] hwnd=${hwnd}, scaleFactor=${scaleFactor}, dip=(${dipTopLeft.x},${dipTopLeft.y})-(${dipBottomRight.x},${dipBottomRight.y}), screen=(${screenTopLeft.x},${screenTopLeft.y}), size=(${width}x${height})[physical]`);
   
   // 使用物理像素坐标
-  const cmd = `[WinAPI]::SetWindowPos([IntPtr]${hwnd},[IntPtr]::Zero,${screenPoint.x},${screenPoint.y},${width},${height},0x0014)|Out-Null\n`;
+  const cmd = `[WinAPI]::SetWindowPos([IntPtr]${hwnd},[IntPtr]::Zero,${screenTopLeft.x},${screenTopLeft.y},${width},${height},0x0014)|Out-Null\n`;
   return psWrite(cmd);
 }
 
