@@ -102,7 +102,7 @@ const embeddedWindows: Map<string, EmbeddedWindowInfo> = new Map();
 // 嵌入队列 - 确保嵌入操作顺序执行
 interface EmbedTask {
   paneId: string;
-  paneBounds: { x: number; y: number; width: number; height: number };
+  paneBounds: { x: number; y: number; width: number; height: number; dpr?: number };
   parentHwndBuffer: Buffer;
   parentHwndNumber: number;
   targetPid?: number; // 目标进程 PID，用于精确匹配
@@ -131,17 +131,25 @@ async function processEmbedQueue() {
       // 获取已嵌入的窗口列表
       const existingHwnds = Array.from(embeddedWindows.values()).map(info => info.hwnd);
       
-      // 使用 Electron 的 getContentBounds 计算精确的屏幕坐标
-      let screenBounds = task.paneBounds;
+      // 计算屏幕坐标：转换为物理像素（Per-Monitor V2 模式）
+      let screenBounds = { x: 0, y: 0, width: task.paneBounds.width, height: task.paneBounds.height };
       if (mainWindow) {
         const contentBounds = mainWindow.getContentBounds();
+        const display = screen.getDisplayMatching(mainWindow.getBounds());
+        const scaleFactor = display.scaleFactor || 1;
+        
+        // 计算 DIP 坐标并转换为物理像素
+        const dipX = contentBounds.x + task.paneBounds.x;
+        const dipY = contentBounds.y + task.paneBounds.y;
+        const screenPoint = screen.dipToScreenPoint({ x: dipX, y: dipY });
+        
         screenBounds = {
-          x: contentBounds.x + task.paneBounds.x,
-          y: contentBounds.y + task.paneBounds.y,
-          width: task.paneBounds.width,
-          height: task.paneBounds.height,
+          x: screenPoint.x,
+          y: screenPoint.y,
+          width: Math.round(task.paneBounds.width * scaleFactor),
+          height: Math.round(task.paneBounds.height * scaleFactor),
         };
-        log(`[EmbedQueue] Content bounds: ${JSON.stringify(contentBounds)}, Screen bounds: ${JSON.stringify(screenBounds)}`);
+        log(`[EmbedQueue] scaleFactor=${scaleFactor}, dip=(${dipX},${dipY}), screen=(${screenBounds.x},${screenBounds.y},${screenBounds.width}x${screenBounds.height})[physical]`);
       }
       
       const result = await embedWindowWithPowerShell('Cursor', task.parentHwndBuffer, screenBounds, existingHwnds, task.targetPid);
@@ -341,12 +349,14 @@ function initPowerShellProcess() {
   // 添加 ShowWindow 和 SetLayeredWindowAttributes 用于隐藏/透明度控制
   // 添加 PostMessage 用于关闭窗口
   // 添加 ClientToScreen 用于精确获取客户区屏幕坐标（解决窗口不贴合问题）
+  // 添加 SetProcessDpiAwarenessContext 设置 Per-Monitor DPI Aware V2 模式
   const initCode = `
-Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public struct RECT{public int L,T,R,B;}public class WinAPI{[DllImport("user32.dll")]public static extern bool MoveWindow(IntPtr h,int x,int y,int w,int h2,bool r);[DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int h2,uint f);[DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out RECT r);[DllImport("user32.dll")]public static extern bool ClientToScreen(IntPtr h,IntPtr pt);[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public static extern IntPtr SetFocus(IntPtr h);[DllImport("user32.dll")]public static extern bool EnableWindow(IntPtr h,bool e);[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);[DllImport("user32.dll")]public static extern bool AttachThreadInput(uint a,uint b,bool c);[DllImport("kernel32.dll")]public static extern uint GetCurrentThreadId();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int c);[DllImport("user32.dll")]public static extern int GetWindowLong(IntPtr h,int i);[DllImport("user32.dll")]public static extern int SetWindowLong(IntPtr h,int i,int v);[DllImport("user32.dll")]public static extern bool SetLayeredWindowAttributes(IntPtr h,uint k,byte a,uint f);[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);}'
+Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public struct RECT{public int L,T,R,B;}public class WinAPI{[DllImport("user32.dll")]public static extern bool MoveWindow(IntPtr h,int x,int y,int w,int h2,bool r);[DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int h2,uint f);[DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out RECT r);[DllImport("user32.dll")]public static extern bool ClientToScreen(IntPtr h,IntPtr pt);[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public static extern IntPtr SetFocus(IntPtr h);[DllImport("user32.dll")]public static extern bool EnableWindow(IntPtr h,bool e);[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);[DllImport("user32.dll")]public static extern bool AttachThreadInput(uint a,uint b,bool c);[DllImport("kernel32.dll")]public static extern uint GetCurrentThreadId();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int c);[DllImport("user32.dll")]public static extern int GetWindowLong(IntPtr h,int i);[DllImport("user32.dll")]public static extern int SetWindowLong(IntPtr h,int i,int v);[DllImport("user32.dll")]public static extern bool SetLayeredWindowAttributes(IntPtr h,uint k,byte a,uint f);[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);[DllImport("user32.dll")]public static extern bool SetProcessDpiAwarenessContext(IntPtr v);}'
 $global:GWL_EXSTYLE=-20
 $global:WS_EX_LAYERED=0x80000
 $global:LWA_ALPHA=2
 $global:WM_CLOSE=0x0010
+[WinAPI]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))|Out-Null
 Write-Host "PS_READY"
 `;
   // 初始化代码必须直接写入（不能用 psWrite，因为 psReady 还是 false）
@@ -387,10 +397,11 @@ Write-Host "PS_READY"
 
 
 // 使用常驻 PowerShell 调整窗口位置
-// 不使用 SetParent，所以需要计算屏幕坐标
+// bounds 包含 CSS 像素坐标（DIP）
+// PowerShell 已设置为 Per-Monitor DPI Aware V2，SetWindowPos 需要物理像素坐标
 async function resizeEmbeddedWindowWithPowerShell(
   hwnd: number,
-  bounds: { x: number; y: number; width: number; height: number }
+  bounds: { x: number; y: number; width: number; height: number; dpr?: number }
 ): Promise<boolean> {
   if (process.platform !== 'win32') return false;
   
@@ -404,18 +415,27 @@ async function resizeEmbeddedWindowWithPowerShell(
   
   if (!mainWindow) return false;
   
-  // 使用 Electron 的 getContentBounds() 获取客户区的屏幕坐标
-  // 这比 Windows API 更可靠，因为 Electron 知道自己窗口的精确位置
+  // 获取主窗口客户区在屏幕上的位置（DIP）
   const contentBounds = mainWindow.getContentBounds();
   
-  // 计算嵌入窗口在屏幕上的最终位置
-  // bounds.x/y 是相对于视口（客户区）的坐标
-  const screenX = contentBounds.x + bounds.x;
-  const screenY = contentBounds.y + bounds.y;
+  // 获取主窗口所在显示器的 scaleFactor
+  const display = screen.getDisplayMatching(mainWindow.getBounds());
+  const scaleFactor = display.scaleFactor || 1;
+  
+  // 计算 DIP 坐标
+  const dipX = contentBounds.x + bounds.x;
+  const dipY = contentBounds.y + bounds.y;
+  
+  // 转换为物理像素坐标（Per-Monitor V2 模式下 SetWindowPos 需要物理像素）
+  const screenPoint = screen.dipToScreenPoint({ x: dipX, y: dipY });
+  const width = Math.round(bounds.width * scaleFactor);
+  const height = Math.round(bounds.height * scaleFactor);
   
   resizeCount++;
-  // 直接使用计算好的屏幕坐标定位窗口
-  const cmd = `[WinAPI]::SetWindowPos([IntPtr]${hwnd},[IntPtr]::Zero,${screenX},${screenY},${bounds.width},${bounds.height},0x0014)|Out-Null\n`;
+  log(`[Resize] hwnd=${hwnd}, scaleFactor=${scaleFactor}, dip=(${dipX},${dipY}), screen=(${screenPoint.x},${screenPoint.y}), size=(${width}x${height})[physical]`);
+  
+  // 使用物理像素坐标
+  const cmd = `[WinAPI]::SetWindowPos([IntPtr]${hwnd},[IntPtr]::Zero,${screenPoint.x},${screenPoint.y},${width},${height},0x0014)|Out-Null\n`;
   return psWrite(cmd);
 }
 
@@ -691,7 +711,7 @@ ipcMain.handle('select-cursor-file', async () => {
 });
 
 // 打开Cursor实例并嵌入到窗格中
-ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number }) => {
+ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number; dpr?: number }) => {
   const cursorPath = getCursorPath();
   
   log('');
@@ -811,9 +831,9 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
 });
 
 // 调整嵌入窗口大小
-ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: { x: number; y: number; width: number; height: number }) => {
+ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: { x: number; y: number; width: number; height: number; dpr?: number }) => {
   const info = embeddedWindows.get(paneId);
-  log(`[IPC resize-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}, bounds=`, bounds);
+  log(`[IPC resize-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}, dpr=${bounds.dpr}, bounds=`, bounds);
   if (info) {
     return await resizeEmbeddedWindowWithPowerShell(info.hwnd, bounds);
   }

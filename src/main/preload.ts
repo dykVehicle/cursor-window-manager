@@ -16,9 +16,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   detectCursorPath: () => ipcRenderer.invoke('detect-cursor-path'),
   validateCursorPath: (path: string) => ipcRenderer.invoke('validate-cursor-path', path),
   selectCursorFile: () => ipcRenderer.invoke('select-cursor-file'),
-  openCursor: (paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number }) => 
+  openCursor: (paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number; dpr?: number }) => 
     ipcRenderer.invoke('open-cursor', paneId, folderPath, paneBounds),
-  resizeEmbeddedWindow: (paneId: string, bounds: { x: number; y: number; width: number; height: number }) =>
+  resizeEmbeddedWindow: (paneId: string, bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
     ipcRenderer.invoke('resize-embedded-window', paneId, bounds),
   focusEmbeddedWindow: (paneId: string) =>
     ipcRenderer.invoke('focus-embedded-window', paneId),

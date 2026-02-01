@@ -1,4 +1,0 @@
-# Cursor Rules 模板
-
-## 1. .cursorrules读取规则
-始终读取当前目录的所有父目录中的.cursorrules，然后再增加读取当前.cursorrules

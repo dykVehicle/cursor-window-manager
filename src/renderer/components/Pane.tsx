@@ -41,18 +41,25 @@ function Pane({
   
   // 获取窗格内容区域的坐标（相对于父窗口客户区）
   // 使用 Owner 模式浮动窗口，坐标是相对于父窗口的
+  // 返回 CSS 像素，主进程会处理 DPI 缩放转换
   const getPaneBounds = useCallback(() => {
     if (contentRef.current) {
-      // 直接使用 content 区域的位置，更精确
+      // 直接使用 content 区域的位置
       const contentRect = contentRef.current.getBoundingClientRect();
+      // 同时传递 devicePixelRatio 给主进程统一处理
+      const dpr = window.devicePixelRatio || 1;
+      log('[getPaneBounds] DPI scale factor:', dpr);
+      log('[getPaneBounds] CSS pixels:', contentRect.left, contentRect.top, contentRect.width, contentRect.height);
+      
       return {
         x: Math.round(contentRect.left),
         y: Math.round(contentRect.top),
         width: Math.round(contentRect.width),
         height: Math.round(contentRect.height),
+        dpr: dpr, // 传递缩放因子
       };
     }
-    return { x: 0, y: 0, width: 800, height: 600 };
+    return { x: 0, y: 0, width: 800, height: 600, dpr: 1 };
   }, []);
   
   // 处理打开Cursor
