@@ -7,7 +7,7 @@ import './styles/app.css';
 
 // 调试开关 - 生产环境关闭
 const DEBUG = false;
-const log = DEBUG ? log.bind(console) : () => {};
+const log = DEBUG ? console.log.bind(console) : () => {};
 
 // 默认布局 - 4窗口 (2x2)
 const DEFAULT_LAYOUT: WindowLayout = {
@@ -147,10 +147,39 @@ function App() {
       await window.electronAPI.stateSaved();
     });
 
+    // 全局监听主窗口移动事件 - 更新所有运行中的 Cursor 窗口位置
+    // 使用节流确保不会过于频繁
+    let lastUpdateTime = 0;
+    const THROTTLE_MS = 8; // ~120fps
+    
+    window.electronAPI.onWindowMoved(() => {
+      const now = Date.now();
+      if (now - lastUpdateTime < THROTTLE_MS) return;
+      lastUpdateTime = now;
+      
+      // 更新所有运行中的 pane 窗口位置
+      const currentPanes = panesRef.current;
+      const runningPanes = Object.keys(currentPanes).filter(id => currentPanes[id]?.isRunning);
+      
+      runningPanes.forEach(paneId => {
+        const paneEl = document.querySelector(`[data-pane-id="${paneId}"] .pane-content`);
+        if (paneEl) {
+          const rect = paneEl.getBoundingClientRect();
+          window.electronAPI.resizeEmbeddedWindow(paneId, {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          });
+        }
+      });
+    });
+
     return () => {
       window.electronAPI.removeAllListeners('cursor-closed');
       window.electronAPI.removeAllListeners('cursor-error');
       window.electronAPI.removeAllListeners('save-state-before-close');
+      window.electronAPI.removeAllListeners('window-moved');
     };
   }, []); // 依赖数组为空，只在组件挂载时注册一次
 

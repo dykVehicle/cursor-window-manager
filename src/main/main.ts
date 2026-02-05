@@ -5,6 +5,9 @@ import Store from 'electron-store';
 import { spawn, ChildProcess, exec, execSync } from 'child_process';
 import { WindowLayout, PaneConfig, AppConfig } from './types';
 
+// Linux 窗口嵌入模块
+import * as linuxEmbed from './linuxWindowEmbed';
+
 // ============ 获取程序运行目录 ============
 // 获取程序运行的实际目录（而不是用户数据目录）
 function getAppDirectory(): string {
@@ -618,18 +621,21 @@ function createWindow(): void {
     // 这样下次启动时可以自动恢复
     mainWindow.webContents.send('save-state-before-close');
     
-    // 关闭所有嵌入的 Cursor 窗口（发送 WM_CLOSE 消息）
+    // 关闭所有嵌入的 Cursor 窗口
     if (process.platform === 'win32' && psProcess && psReady && embeddedWindows.size > 0) {
-      log('[Cleanup] Closing all embedded Cursor windows before exit...');
+      log('[Cleanup] Closing all embedded Cursor windows before exit (Windows)...');
       
       for (const [paneId, info] of embeddedWindows) {
         log(`[Cleanup] Sending WM_CLOSE to: paneId=${paneId}, hwnd=${info.hwnd}`);
         // 使用 PostMessage 发送 WM_CLOSE（异步，不等待响应）
         psWrite(`[WinAPI]::PostMessage([IntPtr]${info.hwnd},$global:WM_CLOSE,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null\n`);
       }
+      embeddedWindows.clear();
+    } else if (process.platform === 'linux') {
+      log('[Cleanup] Closing all embedded Cursor windows before exit (Linux)...');
+      // 同步关闭所有嵌入窗口（不等待，让后台执行）
+      linuxEmbed.cleanupAllWindowsSync();
     }
-    
-    embeddedWindows.clear();
     
     // 等待渲染进程保存状态完成（通过 state-saved IPC），最多等待 2 秒
     // 如果超时，强制关闭
@@ -660,15 +666,127 @@ function createWindow(): void {
     }, 1000);
   });
   
-  // 主窗口移动时通知渲染进程更新 Cursor 窗口位置
+  // 存储每个 pane 的相对位置（用于 Linux 直接同步优化）
+  // 这些位置由渲染进程在 resize 时更新
+  const paneRelativePositions: Map<string, { x: number; y: number; width: number; height: number }> = new Map();
+  
+  // 导出更新 pane 位置的方法（供 IPC 处理程序使用）
+  (mainWindow as any).updatePanePosition = (paneId: string, pos: { x: number; y: number; width: number; height: number }) => {
+    paneRelativePositions.set(paneId, pos);
+  };
+  
+  // 调试计数器
+  let moveEventCount = 0;
+  let lastMoveLogTime = 0;
+  
+  // Linux: 主窗口拖拽时的高频同步调度器（避免 move 事件频率不足/过载）
+  let linuxFollowTimer: NodeJS.Timeout | null = null;
+  let linuxLastActivityAt = 0;
+  let linuxLastSyncAt = 0;
+  let linuxLastContentBounds: { x: number; y: number; width: number; height: number } | null = null;
+  
+  function syncLinuxEmbeddedWindows(): void {
+    if (!mainWindow) return;
+    if (paneRelativePositions.size === 0) return;
+    
+    const contentBounds = mainWindow.getContentBounds();
+    
+    // 如果主窗口客户区没变化，跳过（减少无效 spawn）
+    if (
+      linuxLastContentBounds &&
+      contentBounds.x === linuxLastContentBounds.x &&
+      contentBounds.y === linuxLastContentBounds.y &&
+      contentBounds.width === linuxLastContentBounds.width &&
+      contentBounds.height === linuxLastContentBounds.height
+    ) {
+      return;
+    }
+    linuxLastContentBounds = {
+      x: contentBounds.x,
+      y: contentBounds.y,
+      width: contentBounds.width,
+      height: contentBounds.height,
+    };
+    
+    const ops: Array<{ windowId: string; x: number; y: number; width: number; height: number }> = [];
+    
+    for (const [paneId, relPos] of paneRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+      if (!info) continue;
+      
+      ops.push({
+        windowId: info.windowId,
+        x: contentBounds.x + relPos.x,
+        y: contentBounds.y + relPos.y,
+        width: relPos.width,
+        height: relPos.height,
+      });
+    }
+    
+    // 批量同步，单次 xdotool 调用显著减小拖拽卡顿
+    linuxEmbed.batchMoveResizeWindowsSync(ops, { raise: true });
+  }
+  
+  function kickLinuxFollowLoop(): void {
+    linuxLastActivityAt = Date.now();
+    if (linuxFollowTimer) return;
+    
+    const tick = () => {
+      linuxFollowTimer = null;
+      if (!mainWindow) return;
+      
+      const now = Date.now();
+      // ~60fps 限速，避免主进程 spawn 过载
+      if (now - linuxLastSyncAt >= 16) {
+        linuxLastSyncAt = now;
+        syncLinuxEmbeddedWindows();
+      }
+      
+      // 只要近期还在移动，就继续下一帧
+      if (now - linuxLastActivityAt < 250) {
+        linuxFollowTimer = setTimeout(tick, 16);
+      } else {
+        // 拖拽结束后再 raise 一次，避免某些 WM 在结束瞬间把主窗口压到最上层
+        linuxEmbed.raiseAllEmbeddedWindows();
+      }
+    };
+    
+    linuxFollowTimer = setTimeout(tick, 0);
+  }
+  
+  // 主窗口移动时处理
   mainWindow.on('move', () => {
-    mainWindow?.webContents.send('window-moved');
+    moveEventCount++;
+    const now = Date.now();
+    
+    // Linux: 直接在主进程中更新窗口位置，避免 IPC 往返延迟
+    if (process.platform === 'linux' && mainWindow) {
+      // 每秒打印一次调试日志
+      if (now - lastMoveLogTime > 1000) {
+        const contentBounds = mainWindow.getContentBounds();
+        log(`[Move] event#${moveEventCount}, panePositions.size=${paneRelativePositions.size}, contentBounds=(${contentBounds.x},${contentBounds.y})`);
+        lastMoveLogTime = now;
+      }
+      // 启动/续命高频同步循环（批量移动 + 限速）
+      kickLinuxFollowLoop();
+    }
+    
+    // 非 Linux：通知渲染进程去做布局坐标计算 + resize
+    // Linux 已在主进程里用相对坐标直接同步，避免重复 IPC 导致拖拽卡顿
+    if (process.platform !== 'linux') {
+      mainWindow?.webContents.send('window-moved');
+    }
   });
   
   // 主窗口获得焦点时的处理
-  // 浮动窗口模式下，只需要通知渲染进程，不需要做特殊处理
   mainWindow.on('focus', () => {
     log('[MainWindow] Focus received');
+    
+    // Linux: 将所有 Cursor 窗口提升到前面（异步非阻塞）
+    if (process.platform === 'linux') {
+      linuxEmbed.raiseAllEmbeddedWindows();
+    }
+    
     mainWindow?.webContents.send('window-focused');
   });
   
@@ -828,14 +946,73 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
       
       return { success: true, pid: cursorPid || 0 };
       
-    } else {
-      // Linux/macOS: 使用 spawn（暂不支持嵌入）
+    } else if (process.platform === 'linux') {
+      // Linux: 使用 spawn 启动 Cursor，然后用 xdotool 实现伪嵌入
       const args: string[] = ['--new-window'];
       if (folderPath) {
         args.push(folderPath);
       }
       
-      console.log('Spawn args:', args);
+      log('Spawning Cursor on Linux with args:', args);
+      
+      // 先记录现有的 Cursor 窗口，以便后续识别新窗口
+      await linuxEmbed.recordExistingCursorWindows();
+      
+      const proc = spawn(cursorPath, args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      
+      proc.unref();
+      const cursorPid = proc.pid;
+      
+      log('Cursor started with PID:', cursorPid);
+      
+      if (cursorPid) {
+        cursorProcesses.set(paneId, proc);
+        
+        // 尝试嵌入窗口
+        if (paneBounds && mainWindow) {
+          // 延迟后尝试嵌入，让 Cursor 有时间启动并创建窗口
+          setTimeout(async () => {
+            log(`[Linux] Starting embed process for pane: ${paneId}`);
+            const result = await linuxEmbed.embedWindowLinux(paneId, cursorPid, mainWindow!, paneBounds);
+            
+            if (result.success && result.windowId) {
+              log(`[Linux] Embed SUCCESS for pane: ${paneId}, windowId: ${result.windowId}`);
+              mainWindow?.webContents.send('cursor-embedded', paneId, result.windowId);
+              // 立即提升所有嵌入窗口，减少被主窗口遮挡/堆叠异常的概率
+              linuxEmbed.raiseAllEmbeddedWindows();
+            } else {
+              log(`[Linux] Embed FAILED for pane: ${paneId}, error: ${result.error}`);
+              mainWindow?.webContents.send('cursor-error', paneId, result.error || 'Failed to embed window');
+            }
+          }, 4000); // Linux 上 Cursor 启动较慢，给更多时间
+        }
+      }
+
+      proc.on('exit', (code) => {
+        // Cursor 使用 fork 模式，主进程会立即退出，这是正常的
+        log(`Cursor launcher process ${paneId} exited with code:`, code);
+        cursorProcesses.delete(paneId);
+        // 不要在这里删除 embeddedWindow，因为窗口可能仍在运行
+      });
+
+      proc.on('error', (err) => {
+        log(`Failed to start Cursor: ${err.message}`);
+        cursorProcesses.delete(paneId);
+        mainWindow?.webContents.send('cursor-error', paneId, err.message);
+      });
+
+      return { success: true, pid: cursorPid };
+    } else {
+      // macOS: 暂不支持嵌入
+      const args: string[] = ['--new-window'];
+      if (folderPath) {
+        args.push(folderPath);
+      }
+      
+      log('Spawning Cursor on macOS with args:', args);
       
       const proc = spawn(cursorPath, args, {
         detached: true,
@@ -845,19 +1022,7 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
       proc.unref();
       cursorProcesses.set(paneId, proc);
       
-      console.log('Cursor started with PID:', proc.pid);
-
-      proc.on('exit', (code) => {
-        console.log(`Cursor process ${paneId} exited with code:`, code);
-        cursorProcesses.delete(paneId);
-        mainWindow?.webContents.send('cursor-closed', paneId);
-      });
-
-      proc.on('error', (err) => {
-        console.error(`Failed to start Cursor: ${err.message}`);
-        cursorProcesses.delete(paneId);
-        mainWindow?.webContents.send('cursor-error', paneId, err.message);
-      });
+      log('Cursor started with PID:', proc.pid);
 
       return { success: true, pid: proc.pid };
     }
@@ -870,30 +1035,65 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
 
 // 调整嵌入窗口大小
 ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: { x: number; y: number; width: number; height: number; dpr?: number }) => {
-  const info = embeddedWindows.get(paneId);
-  log(`[IPC resize-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}, dpr=${bounds.dpr}, bounds=`, bounds);
-  if (info) {
-    return await resizeEmbeddedWindowWithPowerShell(info.hwnd, bounds);
+  if (process.platform === 'win32') {
+    // Windows: 使用 PowerShell
+    const info = embeddedWindows.get(paneId);
+    log(`[IPC resize-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}, dpr=${bounds.dpr}, bounds=`, bounds);
+    if (info) {
+      return await resizeEmbeddedWindowWithPowerShell(info.hwnd, bounds);
+    }
+    log(`[IPC resize-embedded-window] No hwnd found for paneId=${paneId}`);
+    return false;
+  } else if (process.platform === 'linux') {
+    // Linux: 保存 pane 相对位置并同步窗口
+    if (mainWindow) {
+      // 保存相对位置供主窗口移动时直接使用（避免 IPC 往返）
+      if ((mainWindow as any).updatePanePosition) {
+        (mainWindow as any).updatePanePosition(paneId, bounds);
+        log(`[IPC] Saved pane position: paneId=${paneId}, bounds=(${bounds.x},${bounds.y},${bounds.width}x${bounds.height})`);
+      }
+      
+      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+      if (info) {
+        const contentBounds = mainWindow.getContentBounds();
+        const screenX = contentBounds.x + bounds.x;
+        const screenY = contentBounds.y + bounds.y;
+        return linuxEmbed.moveResizeWindowSync(info.windowId, screenX, screenY, bounds.width, bounds.height);
+      }
+    }
+    return false;
   }
-  log(`[IPC resize-embedded-window] No hwnd found for paneId=${paneId}`);
   return false;
 });
 
 // 设置焦点到嵌入的窗口
 ipcMain.handle('focus-embedded-window', async (_event, paneId: string) => {
-  const info = embeddedWindows.get(paneId);
-  log(`[IPC focus-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}`);
-  if (info && process.platform === 'win32') {
-    // 使用持久化 PowerShell 设置焦点（包含 AttachThreadInput）
-    focusWindowWithPowerShell(info.hwnd, info.parentHwnd);
-    return true;
+  if (process.platform === 'win32') {
+    const info = embeddedWindows.get(paneId);
+    log(`[IPC focus-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}`);
+    if (info) {
+      // 使用持久化 PowerShell 设置焦点（包含 AttachThreadInput）
+      focusWindowWithPowerShell(info.hwnd, info.parentHwnd);
+      return true;
+    }
+  } else if (process.platform === 'linux') {
+    log(`[IPC focus-embedded-window] Linux paneId=${paneId}`);
+    const result = await linuxEmbed.focusEmbeddedWindowLinux(paneId);
+    // 聚焦后提升所有窗口，确保都在主窗口之上
+    linuxEmbed.raiseAllEmbeddedWindows();
+    return result;
   }
   return false;
 });
 
 // 检查是否支持窗口嵌入
-ipcMain.handle('is-embed-supported', () => {
-  return process.platform === 'win32';
+ipcMain.handle('is-embed-supported', async () => {
+  if (process.platform === 'win32') {
+    return true;
+  } else if (process.platform === 'linux') {
+    return await linuxEmbed.isLinuxEmbedSupported();
+  }
+  return false;
 });
 
 // 获取日志文件路径
@@ -915,15 +1115,21 @@ ipcMain.handle('open-log-folder', () => {
 });
 
 // 关闭Cursor实例
-ipcMain.handle('close-cursor', (_event, paneId: string) => {
+ipcMain.handle('close-cursor', async (_event, paneId: string) => {
   log(`[close-cursor] Closing cursor for pane: ${paneId}`);
   
-  // 关闭嵌入的窗口
-  const embedInfo = embeddedWindows.get(paneId);
-  if (embedInfo && process.platform === 'win32' && psProcess && psReady) {
-    log(`[close-cursor] Sending WM_CLOSE to hwnd: ${embedInfo.hwnd}`);
-    psWrite(`[WinAPI]::PostMessage([IntPtr]${embedInfo.hwnd},$global:WM_CLOSE,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null\n`);
-    embeddedWindows.delete(paneId);
+  if (process.platform === 'win32') {
+    // Windows: 关闭嵌入的窗口
+    const embedInfo = embeddedWindows.get(paneId);
+    if (embedInfo && psProcess && psReady) {
+      log(`[close-cursor] Sending WM_CLOSE to hwnd: ${embedInfo.hwnd}`);
+      psWrite(`[WinAPI]::PostMessage([IntPtr]${embedInfo.hwnd},$global:WM_CLOSE,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null\n`);
+      embeddedWindows.delete(paneId);
+    }
+  } else if (process.platform === 'linux') {
+    // Linux: 使用 xdotool 关闭窗口
+    log(`[close-cursor] Closing Linux embedded window for pane: ${paneId}`);
+    await linuxEmbed.closeEmbeddedWindowLinux(paneId);
   }
   
   // 关闭进程
@@ -933,7 +1139,7 @@ ipcMain.handle('close-cursor', (_event, paneId: string) => {
     cursorProcesses.delete(paneId);
     return true;
   }
-  return embedInfo !== undefined;
+  return true;
 });
 
 // 选择文件夹

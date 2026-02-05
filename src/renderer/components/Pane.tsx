@@ -3,7 +3,7 @@ import { PaneConfig } from '../types';
 
 // 调试开关 - 生产环境关闭
 const DEBUG = false;
-const log = DEBUG ? log.bind(console) : () => {};
+const log = DEBUG ? console.log.bind(console) : () => {};
 
 interface PaneProps {
   paneId: string;
@@ -104,6 +104,7 @@ function Pane({
   }, [paneId, getPaneBounds]);
   
   // 监听窗格大小变化，更新嵌入窗口大小
+  // 注意：window-moved 事件在 App.tsx 中统一处理，避免多个 Pane 的 removeAllListeners 相互干扰
   useEffect(() => {
     // 只要 Cursor 在运行就监听 resize
     if (!config.isRunning || !paneRef.current) return;
@@ -132,15 +133,8 @@ function Pane({
       isResizing = false;
     };
     
-    // 立即更新（不防抖）- 用于主窗口移动时
-    const doResizeImmediate = () => {
-      const bounds = getPaneBounds();
-      lastBounds = { ...bounds };
-      window.electronAPI.resizeEmbeddedWindow(paneId, bounds);
-    };
-    
     const handleResize = () => {
-      // 使用 50ms 防抖（现在 resize 很快了）
+      // 使用 50ms 防抖
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }
@@ -154,15 +148,12 @@ function Pane({
     // 同时监听窗口 resize
     window.addEventListener('resize', handleResize);
     
-    // 监听主窗口移动事件（浮动窗口模式需要同步位置）
-    window.electronAPI.onWindowMoved(doResizeImmediate);
-    
     // 监听窗口最大化/还原事件 - 需要立即调整大小
     window.electronAPI.onWindowMaximizedChange(() => {
       // 最大化/还原后延迟多次调整，确保尺寸正确
-      setTimeout(doResizeImmediate, 100);
-      setTimeout(doResizeImmediate, 300);
-      setTimeout(doResizeImmediate, 500);
+      setTimeout(doResize, 100);
+      setTimeout(doResize, 300);
+      setTimeout(doResize, 500);
     });
     
     // 初始调整一次（延迟执行）
@@ -172,7 +163,6 @@ function Pane({
       if (debounceTimer) clearTimeout(debounceTimer);
       resizeObserver.disconnect();
       window.removeEventListener('resize', handleResize);
-      window.electronAPI.removeAllListeners('window-moved');
       window.electronAPI.removeAllListeners('window-maximized-change');
     };
   }, [config.isRunning, paneId, getPaneBounds]);
