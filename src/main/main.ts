@@ -556,6 +556,61 @@ function getCursorPath(): string {
   return 'cursor';
 }
 
+// 存储每个 pane 的相对位置（用于 Linux 直接同步优化 + 输入穿透区域计算）
+// 这些位置由渲染进程在 resize 时更新
+const paneRelativePositions: Map<string, { x: number; y: number; width: number; height: number }> = new Map();
+
+// Linux: 更新主窗口输入穿透区域（XShape ShapeInput）
+// 在主窗口对应 pane 区域打"输入穿透洞"，让鼠标事件穿透到浮动的 Cursor 窗口
+let inputShapeUpdateTimer: NodeJS.Timeout | null = null;
+function scheduleInputShapeUpdate(): void {
+  if (process.platform !== 'linux' || !mainWindow) return;
+  // 防抖：50ms 内只执行一次
+  if (inputShapeUpdateTimer) clearTimeout(inputShapeUpdateTimer);
+  inputShapeUpdateTimer = setTimeout(() => {
+    if (!mainWindow) return;
+    
+    // 检查是否有非 reparented 的嵌入窗口需要 XShape
+    let hasNonReparented = false;
+    for (const [paneId] of paneRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+      if (info && !linuxEmbed.isWindowReparented(paneId)) {
+        hasNonReparented = true;
+        break;
+      }
+    }
+    if (!hasNonReparented) return; // 全部是 reparent 模式，不需要 XShape
+    
+    const contentBounds = mainWindow.getContentBounds();
+    const winBounds = mainWindow.getBounds();
+    const w = winBounds.width;
+    const h = winBounds.height;
+    const offsetX = contentBounds.x - winBounds.x;
+    const offsetY = contentBounds.y - winBounds.y;
+    
+    const excludeRegions: Array<{x: number, y: number, width: number, height: number}> = [];
+    for (const [paneId, relPos] of paneRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+      if (info && !linuxEmbed.isWindowReparented(paneId)) {
+        excludeRegions.push({
+          x: relPos.x + offsetX,
+          y: relPos.y + offsetY,
+          width: relPos.width,
+          height: relPos.height,
+        });
+      }
+    }
+    
+    log(`[InputShape] Update: window=${w}x${h}, excludeRegions=${excludeRegions.length}`);
+    
+    if (excludeRegions.length > 0) {
+      linuxEmbed.updateMainWindowInputShape(w, h, excludeRegions);
+    } else {
+      linuxEmbed.resetMainWindowInputShape(w, h);
+    }
+  }, 50);
+}
+
 function createWindow(): void {
   const bounds = store.get('windowBounds');
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
@@ -666,9 +721,7 @@ function createWindow(): void {
     }, 1000);
   });
   
-  // 存储每个 pane 的相对位置（用于 Linux 直接同步优化）
-  // 这些位置由渲染进程在 resize 时更新
-  const paneRelativePositions: Map<string, { x: number; y: number; width: number; height: number }> = new Map();
+  // paneRelativePositions 和 scheduleInputShapeUpdate 已移到模块级别（供 IPC handlers 使用）
   
   // 导出更新 pane 位置的方法（供 IPC 处理程序使用）
   (mainWindow as any).updatePanePosition = (paneId: string, pos: { x: number; y: number; width: number; height: number }) => {
@@ -714,6 +767,9 @@ function createWindow(): void {
       const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
       if (!info) continue;
       
+      // reparent 模式下子窗口自动跟随父窗口移动，不需要重新定位
+      if (linuxEmbed.isWindowReparented(paneId)) continue;
+      
       ops.push({
         windowId: info.windowId,
         x: contentBounds.x + relPos.x,
@@ -724,7 +780,9 @@ function createWindow(): void {
     }
     
     // 批量同步，单次 xdotool 调用显著减小拖拽卡顿
-    linuxEmbed.batchMoveResizeWindowsSync(ops, { raise: true });
+    if (ops.length > 0) {
+      linuxEmbed.batchMoveResizeWindowsSync(ops, { raise: true });
+    }
   }
   
   function kickLinuxFollowLoop(): void {
@@ -782,21 +840,78 @@ function createWindow(): void {
   mainWindow.on('focus', () => {
     log('[MainWindow] Focus received');
     
-    // Linux: 将所有 Cursor 窗口提升到前面（异步非阻塞）
+    // Linux: 将所有 Cursor 窗口提升到主窗口之上（同步 X11 API + 延迟兜底）
     if (process.platform === 'linux') {
+      // 立即同步提升（X11 API，无延迟）
       linuxEmbed.raiseAllEmbeddedWindows();
+      // 延迟 50ms 再次提升（等待 WM 完成焦点切换处理）
+      setTimeout(() => linuxEmbed.raiseAllEmbeddedWindows(), 50);
+      // 延迟 150ms 最后一次提升（某些 WM 处理较慢）
+      setTimeout(() => linuxEmbed.raiseAllEmbeddedWindows(), 150);
     }
     
     mainWindow?.webContents.send('window-focused');
   });
   
-  // 窗口最大化/还原时通知渲染进程
+  // 窗口最大化/还原时通知渲染进程 + Linux 重新同步浮动窗口
   mainWindow.on('maximize', () => {
     mainWindow?.webContents.send('window-maximized-change', true);
+    if (process.platform === 'linux') {
+      // 最大化后延迟提升（等待 WM 完成动画）
+      setTimeout(() => {
+        syncLinuxEmbeddedWindows();
+        linuxEmbed.raiseAllEmbeddedWindows();
+      }, 200);
+      setTimeout(() => linuxEmbed.raiseAllEmbeddedWindows(), 500);
+    }
   });
   
   mainWindow.on('unmaximize', () => {
     mainWindow?.webContents.send('window-maximized-change', false);
+    if (process.platform === 'linux') {
+      setTimeout(() => {
+        syncLinuxEmbeddedWindows();
+        linuxEmbed.raiseAllEmbeddedWindows();
+      }, 200);
+      setTimeout(() => linuxEmbed.raiseAllEmbeddedWindows(), 500);
+    }
+  });
+  
+  // Linux: 主窗口大小改变时更新浮动窗口位置 + 输入穿透区域
+  mainWindow.on('resize', () => {
+    if (process.platform === 'linux') {
+      // 更新 XShape 输入穿透区域
+      scheduleInputShapeUpdate();
+      // ★ 关键：通知渲染进程重新计算所有 pane 的位置
+      // resize 会改变 pane 的 CSS 布局，必须由渲染进程 getBoundingClientRect() 获取新坐标
+      // 然后通过 resizeEmbeddedWindow IPC 传回主进程更新浮动窗口位置
+      // （注意：move 事件不需要此通知，因为 move 不改变 pane 相对位置，主进程直接同步即可）
+      mainWindow?.webContents.send('window-moved');
+      // 直接提升所有浮动窗口（resize 时 WM 可能将主窗口覆盖到浮动窗口之上）
+      linuxEmbed.raiseAllEmbeddedWindows();
+    }
+  });
+  
+  // Linux: 主窗口最小化时，子 Cursor 窗口跟随最小化
+  mainWindow.on('minimize', () => {
+    log('[MainWindow] Minimized');
+    if (process.platform === 'linux') {
+      linuxEmbed.minimizeAllWindows();
+    }
+  });
+  
+  // Linux: 主窗口恢复时，子 Cursor 窗口跟随恢复并重新定位
+  mainWindow.on('restore', () => {
+    log('[MainWindow] Restored');
+    if (process.platform === 'linux') {
+      // 先恢复窗口显示
+      linuxEmbed.restoreAllWindows();
+      // 延迟后重新同步位置并提升（等待窗口管理器完成恢复动画）
+      setTimeout(() => {
+        syncLinuxEmbeddedWindows();
+        linuxEmbed.raiseAllEmbeddedWindows();
+      }, 200);
+    }
   });
 }
 
@@ -981,13 +1096,13 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
             if (result.success && result.windowId) {
               log(`[Linux] Embed SUCCESS for pane: ${paneId}, windowId: ${result.windowId}`);
               mainWindow?.webContents.send('cursor-embedded', paneId, result.windowId);
-              // 立即提升所有嵌入窗口，减少被主窗口遮挡/堆叠异常的概率
               linuxEmbed.raiseAllEmbeddedWindows();
+              scheduleInputShapeUpdate();
             } else {
               log(`[Linux] Embed FAILED for pane: ${paneId}, error: ${result.error}`);
               mainWindow?.webContents.send('cursor-error', paneId, result.error || 'Failed to embed window');
             }
-          }, 4000); // Linux 上 Cursor 启动较慢，给更多时间
+          }, 1000); // 1秒后开始查找窗口（findNewCursorWindow 内部会继续轮询）
         }
       }
 
@@ -1055,9 +1170,12 @@ ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: 
       
       const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
       if (info) {
+        // 浮动窗口模式：使用屏幕绝对坐标 + xdotool
         const contentBounds = mainWindow.getContentBounds();
         const screenX = contentBounds.x + bounds.x;
         const screenY = contentBounds.y + bounds.y;
+        // 更新 XShape 输入穿透区域
+        scheduleInputShapeUpdate();
         return linuxEmbed.moveResizeWindowSync(info.windowId, screenX, screenY, bounds.width, bounds.height);
       }
     }
@@ -1130,6 +1248,8 @@ ipcMain.handle('close-cursor', async (_event, paneId: string) => {
     // Linux: 使用 xdotool 关闭窗口
     log(`[close-cursor] Closing Linux embedded window for pane: ${paneId}`);
     await linuxEmbed.closeEmbeddedWindowLinux(paneId);
+    paneRelativePositions.delete(paneId);
+    scheduleInputShapeUpdate();
   }
   
   // 关闭进程
@@ -1306,13 +1426,96 @@ ipcMain.handle('show-embedded-window', async (_event, paneId: string) => {
   }
 });
 
-app.whenReady().then(() => {
+// 鼠标穿透控制（Linux：动态切换主窗口是否接受鼠标事件）
+ipcMain.handle('set-ignore-mouse-events', (_event, ignore: boolean, options?: { forward: boolean }) => {
+  if (mainWindow) {
+    if (ignore) {
+      mainWindow.setIgnoreMouseEvents(true, options || { forward: true });
+    } else {
+      mainWindow.setIgnoreMouseEvents(false);
+    }
+  }
+});
+
+// ============ CPU 看门狗：检测并杀掉失控的子进程 ============
+let watchdogTimer: NodeJS.Timeout | null = null;
+const WATCHDOG_INTERVAL = 30_000;     // 每 30 秒检查一次
+const MAX_RG_RUNTIME_SECONDS = 120;   // rg 运行超过 2 分钟视为异常
+
+function startCpuWatchdog() {
+  if (process.platform !== 'linux') return;
+  
+  watchdogTimer = setInterval(async () => {
+    try {
+      // 查找所有 rg/ripgrep 进程：PID、运行时长（秒）、CPU%、完整命令
+      const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
+        exec(
+          `ps -eo pid,etimes,%cpu,args --no-headers | grep -E '\\brg\\b' | grep -v grep`,
+          { timeout: 5000 },
+          (err, stdout) => {
+            if (err && !stdout) { resolve({ stdout: '' }); return; }
+            resolve({ stdout: stdout || '' });
+          }
+        );
+      });
+      
+      if (!stdout.trim()) return;
+      
+      const lines = stdout.trim().split('\n');
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 4) continue;
+        
+        const pid = parseInt(parts[0]);
+        const elapsedSeconds = parseInt(parts[1]);
+        const cpuPercent = parseFloat(parts[2]);
+        const cmd = parts.slice(3).join(' ');
+        
+        // 只处理真正的 ripgrep 进程（命令中包含 rg）
+        if (!cmd.includes('/rg') && !cmd.startsWith('rg ') && cmd !== 'rg') continue;
+        
+        // 条件：运行超过 2 分钟 且 CPU > 50%
+        if (elapsedSeconds > MAX_RG_RUNTIME_SECONDS && cpuPercent > 50) {
+          log(`[Watchdog] Killing runaway rg process: PID=${pid}, runtime=${elapsedSeconds}s, CPU=${cpuPercent}%, cmd=${cmd.substring(0, 100)}`);
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch (e: any) {
+            log(`[Watchdog] Failed to kill PID ${pid}: ${e.message}`);
+          }
+        }
+      }
+    } catch (e: any) {
+      // 忽略检查错误
+    }
+  }, WATCHDOG_INTERVAL);
+}
+
+function stopCpuWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
+app.whenReady().then(async () => {
   createWindow();
   
   // 提前初始化 PowerShell 进程（用于快速 resize）
   if (process.platform === 'win32') {
     initPowerShellProcess();
   }
+  
+  // Linux: 记录主窗口 X11 ID（用于子窗口 stacking）
+  if (process.platform === 'linux' && mainWindow) {
+    const mainWinId = await linuxEmbed.getMainWindowId(mainWindow);
+    if (mainWinId) {
+      linuxEmbed.setMainWindowX11Id(mainWinId);
+    }
+  }
+  
+  // 启动 CPU 看门狗
+  startCpuWatchdog();
+  log('[Watchdog] CPU watchdog started');
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1322,6 +1525,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  stopCpuWatchdog();
   if (process.platform !== 'darwin') {
     app.quit();
   }

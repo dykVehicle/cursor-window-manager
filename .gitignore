@@ -28,3 +28,6 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# Runtime data
+data/

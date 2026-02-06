@@ -25,11 +25,20 @@ let x11: {
   XInternAtom: any;
   XSendEvent: any;
   XFlush: any;
+  XRaiseWindow: any;
+  XSetTransientForHint: any;
+  XReparentWindow: any;
+  XMoveResizeWindow: any;
+  XMapWindow: any;
 } | null = null;
 let x11Display: any = null;
 let x11RootWindow: bigint | null = null;
 let x11Atoms: Map<string, bigint> = new Map();
 let x11InitTried = false;
+
+// XShape 扩展（用于设置主窗口输入区域，实现 pane 区域鼠标穿透）
+let xShapeAvailable = false;
+let XShapeCombineRectangles: any = null;
 
 function toBigInt(v: any): bigint {
   return typeof v === 'bigint' ? v : BigInt(v ?? 0);
@@ -62,6 +71,11 @@ function initX11(): boolean {
       XInternAtom: lib.func('XInternAtom', 'ulong', ['void*', 'str', 'int']),
       XSendEvent: lib.func('XSendEvent', 'int', ['void*', 'ulong', 'int', 'long', 'void*']),
       XFlush: lib.func('XFlush', 'int', ['void*']),
+      XRaiseWindow: lib.func('XRaiseWindow', 'int', ['void*', 'ulong']),
+      XSetTransientForHint: lib.func('XSetTransientForHint', 'int', ['void*', 'ulong', 'ulong']),
+      XReparentWindow: lib.func('XReparentWindow', 'int', ['void*', 'ulong', 'ulong', 'int', 'int']),
+      XMoveResizeWindow: lib.func('XMoveResizeWindow', 'int', ['void*', 'ulong', 'int', 'int', 'uint', 'uint']),
+      XMapWindow: lib.func('XMapWindow', 'int', ['void*', 'ulong']),
     };
 
     const displayName = process.env.DISPLAY || '';
@@ -92,6 +106,22 @@ function initX11(): boolean {
     });
 
     log('[X11] Initialized OK, rootWindow=', String(x11RootWindow));
+    
+    // 加载 XShape 扩展（用于输入区域穿透）
+    try {
+      const libXext = koffi.load('libXext.so.6');
+      // XShapeCombineRectangles(Display*, Window, int kind, int x_off, int y_off, XRectangle*, int n_rects, int op, int ordering)
+      // XRectangle = { short x, short y, unsigned short width, unsigned short height } = 8 bytes
+      XShapeCombineRectangles = libXext.func('XShapeCombineRectangles', 'void', [
+        'void*', 'ulong', 'int', 'int', 'int', 'void*', 'int', 'int', 'int'
+      ]);
+      xShapeAvailable = true;
+      log('[X11] XShape extension loaded OK');
+    } catch (e: any) {
+      log('[X11] XShape extension not available:', e?.message);
+      xShapeAvailable = false;
+    }
+    
     return true;
   } catch (e: any) {
     log('[X11] init failed:', e?.message || String(e));
@@ -244,6 +274,7 @@ export async function checkXdotool(): Promise<boolean> {
 interface LinuxWindowInfo {
   windowId: string;  // X11 窗口 ID
   pid: number;
+  reparented?: boolean;  // 是否已通过 XReparentWindow 嵌入
 }
 
 const embeddedWindows: Map<string, LinuxWindowInfo> = new Map();
@@ -263,6 +294,162 @@ startDebugInterval();
 
 // 记录已知的 Cursor 窗口 ID（用于排除）
 const knownCursorWindowIds: Set<string> = new Set();
+
+// 存储主窗口 X11 ID（用于 stacking）
+let mainWindowX11Id: string | null = null;
+
+/**
+ * 设置主窗口 X11 ID（在嵌入前由 main.ts 调用）
+ */
+export function setMainWindowX11Id(id: string): void {
+  mainWindowX11Id = id;
+  log(`[X11] Main window X11 ID set to: ${id}`);
+}
+
+// ============ XReparentWindow 嵌入 ============
+// 将子 Cursor 窗口 reparent 到主 Electron 窗口中，成为真正的 X11 子窗口
+// 这样输入事件会自动正确分发到子窗口，不需要 XShape 穿透
+
+/**
+ * 将窗口重新挂载为另一个窗口的 X11 子窗口
+ * reparent 后窗口坐标变为相对于父窗口，且自动跟随父窗口最小化/关闭
+ */
+export function reparentWindow(childId: string, parentId: string, x: number, y: number): boolean {
+  if (!initX11() || !x11 || !x11Display) return false;
+  try {
+    const childWin = toBigInt(childId);
+    const parentWin = toBigInt(parentId);
+    x11.XReparentWindow(x11Display, childWin, parentWin, Math.round(x), Math.round(y));
+    x11.XMapWindow(x11Display, childWin);
+    x11.XFlush(x11Display);
+    log(`[X11] XReparentWindow: child=${childId} -> parent=${parentId} at (${x}, ${y})`);
+    return true;
+  } catch (e: any) {
+    log(`[X11] XReparentWindow failed: ${e?.message}`);
+    return false;
+  }
+}
+
+/**
+ * 使用 X11 API 直接移动和调整窗口大小（用于 reparent 后的子窗口）
+ * 坐标是相对于父窗口的
+ */
+export function moveResizeWindowX11(windowId: string, x: number, y: number, width: number, height: number): boolean {
+  if (!x11 || !x11Display) return false;
+  try {
+    x11.XMoveResizeWindow(
+      x11Display,
+      toBigInt(windowId),
+      Math.round(x),
+      Math.round(y),
+      Math.max(1, Math.round(width)),
+      Math.max(1, Math.round(height))
+    );
+    x11.XFlush(x11Display);
+    return true;
+  } catch (e: any) {
+    log(`[X11] XMoveResizeWindow failed: ${e?.message}`);
+    return false;
+  }
+}
+
+/**
+ * 检查窗口是否已被 reparent
+ */
+export function isWindowReparented(paneId: string): boolean {
+  const info = embeddedWindows.get(paneId);
+  return info?.reparented === true;
+}
+
+// ============ XShape 输入穿透 ============
+// XRectangle 结构体：short x, short y, unsigned short width, unsigned short height = 8 bytes
+
+function buildXRectangleBuffer(rects: Array<{x: number, y: number, width: number, height: number}>): Buffer {
+  const buf = Buffer.alloc(rects.length * 8);
+  for (let i = 0; i < rects.length; i++) {
+    buf.writeInt16LE(Math.round(rects[i].x), i * 8);
+    buf.writeInt16LE(Math.round(rects[i].y), i * 8 + 2);
+    buf.writeUInt16LE(Math.round(rects[i].width), i * 8 + 4);
+    buf.writeUInt16LE(Math.round(rects[i].height), i * 8 + 6);
+  }
+  return buf;
+}
+
+/**
+ * 更新主窗口的输入区域（XShape ShapeInput）
+ * 让已嵌入 Cursor 的 pane 内容区域鼠标穿透，点击直接到达子 Cursor 窗口
+ * 
+ * @param windowWidth  主窗口宽度
+ * @param windowHeight 主窗口高度
+ * @param excludeRegions 需要穿透的区域（pane 内容区域坐标，相对于主窗口）
+ */
+export function updateMainWindowInputShape(
+  windowWidth: number,
+  windowHeight: number,
+  excludeRegions: Array<{x: number, y: number, width: number, height: number}>
+): boolean {
+  if (!xShapeAvailable || !XShapeCombineRectangles || !x11Display || !mainWindowX11Id) {
+    return false;
+  }
+  
+  const ShapeInput = 2;
+  const ShapeSet = 0;
+  const ShapeSubtract = 3;
+  const Unsorted = 0;
+  const win = toBigInt(mainWindowX11Id);
+  
+  try {
+    // 1. 设置整个窗口为输入区域
+    const fullRect = buildXRectangleBuffer([{ x: 0, y: 0, width: windowWidth, height: windowHeight }]);
+    XShapeCombineRectangles(x11Display, win, ShapeInput, 0, 0, fullRect, 1, ShapeSet, Unsorted);
+    
+    // 2. 减去每个已嵌入 Cursor 的 pane 内容区域（使这些区域鼠标穿透）
+    for (const region of excludeRegions) {
+      if (region.width <= 0 || region.height <= 0) continue;
+      const rect = buildXRectangleBuffer([region]);
+      XShapeCombineRectangles(x11Display, win, ShapeInput, 0, 0, rect, 1, ShapeSubtract, Unsorted);
+    }
+    
+    if (x11) x11.XFlush(x11Display);
+    return true;
+  } catch (e: any) {
+    log(`[XShape] updateMainWindowInputShape failed: ${e?.message}`);
+    return false;
+  }
+}
+
+/**
+ * 重置主窗口输入区域（取消穿透，恢复正常）
+ */
+export function resetMainWindowInputShape(windowWidth: number, windowHeight: number): boolean {
+  if (!xShapeAvailable || !XShapeCombineRectangles || !x11Display || !mainWindowX11Id) {
+    return false;
+  }
+  
+  try {
+    const fullRect = buildXRectangleBuffer([{ x: 0, y: 0, width: windowWidth, height: windowHeight }]);
+    XShapeCombineRectangles(x11Display, toBigInt(mainWindowX11Id), 2/*ShapeInput*/, 0, 0, fullRect, 1, 0/*ShapeSet*/, 0/*Unsorted*/);
+    if (x11) x11.XFlush(x11Display);
+    return true;
+  } catch (e: any) {
+    log(`[XShape] resetMainWindowInputShape failed: ${e?.message}`);
+    return false;
+  }
+}
+
+/**
+ * 同步提升单个窗口（使用 X11 API，无延迟）
+ */
+function raiseWindowX11(windowId: string): boolean {
+  if (!initX11() || !x11 || !x11Display) return false;
+  try {
+    x11.XRaiseWindow(x11Display, toBigInt(windowId));
+    return true;
+  } catch (e: any) {
+    log(`[X11] XRaiseWindow failed for ${windowId}:`, e?.message);
+    return false;
+  }
+}
 
 /**
  * 获取窗口几何信息
@@ -306,36 +493,53 @@ export async function recordExistingCursorWindows(): Promise<void> {
   }
 }
 
+// 缓存已检查过的小窗口 ID（避免重复检查几何信息）
+const rejectedSmallWindows: Set<string> = new Set();
+
 /**
  * 查找新创建的 Cursor 主窗口
- * 排除已知窗口和小窗口
+ * 使用单条 shell 命令批量获取所有窗口 ID + 几何信息，大幅减少 subprocess 开销
  */
-export async function findNewCursorWindow(maxAttempts: number = 30, delayMs: number = 500): Promise<string | null> {
-  log(`Looking for new Cursor window (excluding ${knownCursorWindowIds.size} known windows)`);
+export async function findNewCursorWindow(maxAttempts: number = 50, delayMs: number = 100): Promise<string | null> {
+  log(`Looking for new Cursor window (excluding ${knownCursorWindowIds.size} known, ${rejectedSmallWindows.size} rejected)`);
   
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const { stdout } = await execAsync('xdotool search --name "Cursor"', { timeout: 5000 });
-      const windowIds = stdout.trim().split('\n').filter(id => id.length > 0);
+      // 单条命令：搜索所有 Cursor 窗口并批量获取几何信息（1 次 subprocess 代替 N 次）
+      // 注意：--shell 输出是多行的，用 tr 合并为单行
+      const { stdout } = await execAsync(
+        `xdotool search --name "Cursor" 2>/dev/null | while read wid; do geo=$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null | tr '\\n' ' '); echo "WID=$wid $geo"; done`,
+        { timeout: 2000, shell: '/bin/bash' }
+      );
       
-      // 查找新的、足够大的窗口
-      for (const windowId of windowIds) {
-        if (knownCursorWindowIds.has(windowId)) continue;
+      // 解析输出：每行 "WID=12345 X=0 Y=0 WIDTH=1280 HEIGHT=800 SCREEN=0"
+      const lines = stdout.trim().split('\n').filter(l => l.startsWith('WID='));
+      for (const line of lines) {
+        const widMatch = line.match(/WID=(\d+)/);
+        const wMatch = line.match(/WIDTH=(\d+)/);
+        const hMatch = line.match(/HEIGHT=(\d+)/);
+        if (!widMatch) continue;
         
-        // 检查窗口大小（排除小于 100x100 的辅助窗口）
-        const geometry = await getWindowGeometry(windowId);
-        if (geometry && geometry.width >= 100 && geometry.height >= 100) {
-          const title = await getWindowTitle(windowId);
-          log(`Found new Cursor window: ID=${windowId}, title="${title}", size=${geometry.width}x${geometry.height} (attempt ${attempt})`);
+        const windowId = widMatch[1];
+        // 跳过已知和已拒绝的窗口
+        if (knownCursorWindowIds.has(windowId) || rejectedSmallWindows.has(windowId)) continue;
+        
+        const width = wMatch ? parseInt(wMatch[1]) : 0;
+        const height = hMatch ? parseInt(hMatch[1]) : 0;
+        
+        if (width >= 100 && height >= 100) {
+          log(`Found new Cursor window: ID=${windowId}, size=${width}x${height} (attempt ${attempt})`);
           return windowId;
+        } else {
+          // 记住这个小窗口，下次不再检查
+          rejectedSmallWindows.add(windowId);
         }
       }
     } catch (e: any) {
-      log(`Search failed: ${e.message}`);
+      // xdotool search 找不到窗口时返回非 0，正常
     }
     
     if (attempt < maxAttempts) {
-      log(`Attempt ${attempt}/${maxAttempts} - waiting...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
@@ -363,50 +567,15 @@ export async function findWindowByTitle(titlePattern: string, excludeIds: string
 
 /**
  * 移除窗口边框装饰
- * 尝试多种方法：_MOTIF_WM_HINTS, wmctrl undecorate, _GTK_HIDE_TITLEBAR_WHEN_MAXIMIZED
- * 注意：Cursor/Electron 应用通常使用 CSD (Client-Side Decorations)，服务器端方法可能无效
+ * 使用 _MOTIF_WM_HINTS（最可靠的方法，几乎所有 WM 都支持）
  */
 export async function removeWindowDecorations(windowId: string): Promise<boolean> {
   log(`Removing decorations for window: ${windowId}`);
   
   try {
-    // 方法1：使用 xprop 设置 _MOTIF_WM_HINTS (最常用的方法)
-    // flags=2 表示只设置 decorations，decorations=0 表示无边框
-    try {
-      await execAsync(`xprop -id ${windowId} -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "2, 0, 0, 0, 0"`);
-      log('Applied _MOTIF_WM_HINTS');
-    } catch (e) {
-      log('_MOTIF_WM_HINTS failed');
-    }
-    
-    // 方法2：使用 wmctrl 移除装饰（如果可用）
-    try {
-      // 转换为十六进制格式
-      const hexId = '0x' + parseInt(windowId).toString(16);
-      await execAsync(`wmctrl -i -r ${hexId} -b add,fullscreen`);
-      await new Promise(resolve => setTimeout(resolve, 100));
-      await execAsync(`wmctrl -i -r ${hexId} -b remove,fullscreen`);
-      log('Applied wmctrl fullscreen toggle trick');
-    } catch (e) {
-      // wmctrl 可能不可用
-    }
-    
-    // 方法3：对于 GTK 应用，尝试设置隐藏标题栏
-    try {
-      await execAsync(`xprop -id ${windowId} -f _GTK_HIDE_TITLEBAR_WHEN_MAXIMIZED 32c -set _GTK_HIDE_TITLEBAR_WHEN_MAXIMIZED 1`);
-      log('Applied _GTK_HIDE_TITLEBAR_WHEN_MAXIMIZED');
-    } catch (e) {
-      // 忽略
-    }
-    
-    // 方法4：设置 _NET_WM_STATE 移除边框相关状态
-    try {
-      await execAsync(`xprop -id ${windowId} -f _NET_WM_STATE 32a -remove _NET_WM_STATE_DECORATED`);
-    } catch (e) {
-      // 忽略
-    }
-    
-    log(`Decorations removal attempted for window: ${windowId}`);
+    // _MOTIF_WM_HINTS: flags=2 表示只设置 decorations，decorations=0 表示无边框
+    await execAsync(`xprop -id ${windowId} -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "2, 0, 0, 0, 0"`, { timeout: 1000 });
+    log('Applied _MOTIF_WM_HINTS - decorations removed');
     return true;
   } catch (e: any) {
     log(`Failed to remove decorations: ${e.message}`);
@@ -415,7 +584,7 @@ export async function removeWindowDecorations(windowId: string): Promise<boolean
 }
 
 /**
- * 移动并调整窗口大小
+ * 移动并调整窗口大小（单次 xdotool 调用，快速）
  */
 export async function moveResizeWindow(
   windowId: string,
@@ -430,28 +599,12 @@ export async function moveResizeWindow(
   const roundH = Math.round(height);
   
   try {
-    // 先激活窗口
-    log(`Activating window: ${windowId}`);
-    await execAsync(`xdotool windowactivate --sync ${windowId}`, { timeout: 3000 });
+    // 单次 xdotool 调用完成：激活 + 调整大小 + 移动 + 提升
+    const cmd = `xdotool windowactivate --sync ${windowId} windowsize ${windowId} ${roundW} ${roundH} windowmove ${windowId} ${roundX} ${roundY} windowraise ${windowId}`;
+    log(`Executing: ${cmd}`);
+    await execAsync(cmd, { timeout: 3000 });
     
-    // 调整大小
-    const sizeCmd = `xdotool windowsize --sync ${windowId} ${roundW} ${roundH}`;
-    log(`Executing: ${sizeCmd}`);
-    await execAsync(sizeCmd, { timeout: 5000 });
-    
-    // 移动
-    const moveCmd = `xdotool windowmove --sync ${windowId} ${roundX} ${roundY}`;
-    log(`Executing: ${moveCmd}`);
-    await execAsync(moveCmd, { timeout: 5000 });
-    
-    // 验证窗口位置和大小
-    try {
-      const { stdout } = await execAsync(`xdotool getwindowgeometry ${windowId}`, { timeout: 2000 });
-      log(`Window geometry after move: ${stdout.trim().replace(/\n/g, ', ')}`);
-    } catch (e) {
-      // 忽略验证错误
-    }
-    
+    log(`Window moved to (${roundX},${roundY}), size ${roundW}x${roundH}`);
     return true;
   } catch (e: any) {
     log(`Failed to move/resize window: ${e.message}`);
@@ -570,53 +723,67 @@ export function batchMoveResizeWindowsSync(
 }
 
 /**
- * 设置窗口置顶（使用多种方法确保生效）
+ * 设置窗口层级（仅使用 windowraise，不设全局 ABOVE 避免遮挡其他程序）
+ * 配合 WM_TRANSIENT_FOR 实现：子窗口在主窗口之上，但不遮挡其他应用
  */
 export async function setWindowAbove(windowId: string, above: boolean = true): Promise<boolean> {
   log(`[setWindowAbove] Setting window ${windowId} above=${above}`);
-  let success = false;
   
   if (above) {
-    // 首选：EWMH ClientMessage（等价于 wmctrl -b add,above），可靠避免被主窗口遮挡
-    // 兼容性：部分 WM 更偏好 _NET_WM_STATE_STAYS_ON_TOP
-    const ewmhAboveOk = requestNetWmState(windowId, '_NET_WM_STATE_ABOVE', 1);
-    const ewmhStayOk = requestNetWmState(windowId, '_NET_WM_STATE_STAYS_ON_TOP', 1);
-    if (ewmhAboveOk || ewmhStayOk) {
-      log(`[setWindowAbove] Set ABOVE/TOP via EWMH for window ${windowId} (above=${ewmhAboveOk}, top=${ewmhStayOk})`);
-      success = true;
-    } else {
-      log(`[setWindowAbove] EWMH method failed, falling back...`);
-    }
-
-    // 兜底：提升窗口（不改变 state，某些 WM 仍可能被覆盖）
-    if (!success) {
-      try {
-        await execAsync(`xdotool windowraise ${windowId}`, { timeout: 1000 });
-        log(`[setWindowAbove] Raised window ${windowId} with xdotool`);
-        success = true;
-      } catch (e) {
-        log(`[setWindowAbove] xdotool windowraise failed`);
-      }
+    try {
+      await execAsync(`xdotool windowraise ${windowId}`, { timeout: 1000 });
+      log(`[setWindowAbove] Raised window ${windowId} with xdotool`);
+      return true;
+    } catch (e) {
+      log(`[setWindowAbove] xdotool windowraise failed`);
+      return false;
     }
   } else {
-    // 移除 ABOVE 状态（目前项目主要用 above=true，仍提供对称实现）
-    const ewmhAboveOk = requestNetWmState(windowId, '_NET_WM_STATE_ABOVE', 0);
-    const ewmhStayOk = requestNetWmState(windowId, '_NET_WM_STATE_STAYS_ON_TOP', 0);
-    success = ewmhAboveOk || ewmhStayOk;
+    // 移除 ABOVE 状态（如果之前有设置的话）
+    requestNetWmState(windowId, '_NET_WM_STATE_ABOVE', 0);
+    requestNetWmState(windowId, '_NET_WM_STATE_STAYS_ON_TOP', 0);
+    return true;
   }
-  
-  return success;
 }
 
 /**
- * 设置窗口为另一个窗口的 transient（类似子窗口关系）
- * 这可以让窗口管理器更好地处理窗口关系
+ * 移除所有嵌入窗口的全局置顶状态（修复遮挡其他程序的问题）
+ */
+export function removeGlobalAboveState(): void {
+  for (const [paneId, info] of embeddedWindows) {
+    requestNetWmState(info.windowId, '_NET_WM_STATE_ABOVE', 0);
+    requestNetWmState(info.windowId, '_NET_WM_STATE_STAYS_ON_TOP', 0);
+    log(`[removeGlobalAbove] Removed ABOVE/TOP for pane=${paneId}, windowId=${info.windowId}`);
+  }
+}
+
+/**
+ * 设置窗口为另一个窗口的 transient（父子窗口关系）
+ * WM_TRANSIENT_FOR 让窗口管理器：
+ *   - 始终将子窗口保持在父窗口之上
+ *   - 父窗口获得焦点时自动提升子窗口
+ *   - 父窗口最小化/恢复时子窗口跟随
  */
 export async function setWindowTransientFor(childWindowId: string, parentWindowId: string): Promise<boolean> {
+  // 优先使用 X11 API（直接传数值，无格式转换问题）
+  if (initX11() && x11 && x11Display) {
+    try {
+      const childWin = toBigInt(childWindowId);
+      const parentWin = toBigInt(parentWindowId);
+      x11.XSetTransientForHint(x11Display, childWin, parentWin);
+      x11.XFlush(x11Display);
+      log(`[X11] Set WM_TRANSIENT_FOR: child=${childWindowId}, parent=${parentWindowId} (via X11 API)`);
+      return true;
+    } catch (e: any) {
+      log(`[X11] XSetTransientForHint failed: ${e?.message}, falling back to xprop`);
+    }
+  }
+  
+  // 兜底：使用 xprop（修复：用 32c 格式 + 十六进制值，确保正确）
   try {
-    // 使用 xprop 设置 WM_TRANSIENT_FOR 属性
-    await execAsync(`xprop -id ${childWindowId} -f WM_TRANSIENT_FOR 32x -set WM_TRANSIENT_FOR ${parentWindowId}`);
-    log(`Set transient_for: child=${childWindowId}, parent=${parentWindowId}`);
+    const hexParentId = '0x' + parseInt(parentWindowId).toString(16);
+    await execAsync(`xprop -id ${childWindowId} -f WM_TRANSIENT_FOR 32x -set WM_TRANSIENT_FOR ${hexParentId}`);
+    log(`Set transient_for via xprop: child=${childWindowId}, parent=${parentWindowId} (hex=${hexParentId})`);
     return true;
   } catch (e: any) {
     log(`Failed to set transient_for: ${e.message}`);
@@ -692,60 +859,51 @@ export async function embedWindowLinux(
   // 将此窗口标记为已知（避免被其他 pane 使用）
   knownCursorWindowIds.add(windowId);
   
-  // 确保窗口不是最大化状态（最大化窗口无法移动/调整大小）
+  // 取消最大化（xprop 方式）
   try {
-    await execAsync(`xdotool windowactivate ${windowId}`);
-    // 尝试取消最大化
-    await execAsync(`xprop -id ${windowId} -f _NET_WM_STATE 32a -remove _NET_WM_STATE_MAXIMIZED_VERT,_NET_WM_STATE_MAXIMIZED_HORZ`);
-    log('Removed maximized state');
+    await execAsync(`xprop -id ${windowId} -f _NET_WM_STATE 32a -remove _NET_WM_STATE_MAXIMIZED_VERT,_NET_WM_STATE_MAXIMIZED_HORZ`, { timeout: 1000 });
   } catch (e) {
-    log('Could not remove maximized state (may not be maximized)');
+    // 忽略（可能不是最大化状态）
   }
   
   // 移除窗口装饰
   await removeWindowDecorations(windowId);
   
-  // 等待装饰移除生效
-  await new Promise(resolve => setTimeout(resolve, 200));
+  const mainWindowId = mainWindowX11Id || (await getMainWindowId(mainWindow));
   
-  // 获取主窗口的 X11 ID 并设置 transient_for 关系
-  // 这可以让窗口管理器将 Cursor 窗口视为主窗口的"子窗口"
-  const mainWindowId = await getMainWindowId(mainWindow);
+  // ★ 不使用 XReparentWindow 嵌入模式
+  // 原因：当 Cursor 窗口通过 XReparentWindow 成为 Electron 主窗口的 X11 子窗口后，
+  // Electron/Chromium 的输入处理层（GTK/GDK）会拦截主窗口上的所有鼠标事件，
+  // 导致子 Cursor 窗口完全无法响应鼠标点击。
+  // 
+  // 改用浮动窗口模式：Cursor 窗口保持为独立的顶层窗口，
+  // 通过 WM_TRANSIENT_FOR 保持在主窗口之上，
+  // 通过 XShape（ShapeInput）在主窗口对应 pane 区域打"输入穿透洞"，
+  // 让鼠标事件直接穿透到下方的浮动 Cursor 窗口。
+  const reparented = false;
+  log(`[Embed] Using floating window mode (transient + XShape) for pane: ${paneId}`);
+  
+  // 设置 WM_TRANSIENT_FOR：让窗口管理器始终将 Cursor 窗口保持在主窗口之上
   if (mainWindowId) {
     await setWindowTransientFor(windowId, mainWindowId);
   }
   
-  // 计算屏幕坐标
+  // 移动到屏幕绝对坐标（主窗口 contentBounds + pane 相对位置）
   const contentBounds = mainWindow.getContentBounds();
   const screenX = contentBounds.x + paneBounds.x;
   const screenY = contentBounds.y + paneBounds.y;
   
   log(`Moving window to: (${screenX}, ${screenY}), size: ${paneBounds.width}x${paneBounds.height}`);
-  log(`Main window content bounds: x=${contentBounds.x}, y=${contentBounds.y}, w=${contentBounds.width}, h=${contentBounds.height}`);
-  log(`Pane bounds: x=${paneBounds.x}, y=${paneBounds.y}, w=${paneBounds.width}, h=${paneBounds.height}`);
   
-  // 移动并调整大小
   const moveResult = await moveResizeWindow(windowId, screenX, screenY, paneBounds.width, paneBounds.height);
   if (!moveResult) {
     return { success: false, error: 'Failed to move/resize window' };
   }
+  raiseWindowX11(windowId);
   
-  // 将窗口置于主窗口之上
-  await setWindowAbove(windowId, true);
-  
-  // 保存窗口信息 - 这是关键步骤！
-  log(`[EMBED] Saving to embeddedWindows: paneId=${paneId}, windowId=${windowId}`);
-  embeddedWindows.set(paneId, { windowId, pid });
-  
-  // 立即验证
-  const savedInfo = embeddedWindows.get(paneId);
-  log(`[EMBED] Verification: size=${embeddedWindows.size}, savedInfo.windowId=${savedInfo?.windowId}`);
-  log(`[EMBED] All keys: ${Array.from(embeddedWindows.keys()).join(',')}`);
-  
-  if (!savedInfo) {
-    log(`[EMBED] ERROR: Failed to save to Map!`);
-    return { success: false, error: 'Failed to save window info to Map' };
-  }
+  // 保存窗口信息
+  embeddedWindows.set(paneId, { windowId, pid, reparented });
+  log(`[EMBED] Done: paneId=${paneId}, windowId=${windowId}, reparented=${reparented}, total=${embeddedWindows.size}`);
   
   return { success: true, windowId };
 }
@@ -815,14 +973,70 @@ export async function focusEmbeddedWindowLinux(paneId: string): Promise<boolean>
 }
 
 /**
- * 关闭嵌入窗口
+ * 通过窗口 ID 获取实际的进程 PID（Cursor fork 后的真实进程）
+ */
+async function getWindowPid(windowId: string): Promise<number | null> {
+  try {
+    const { stdout } = await execAsync(`xdotool getwindowpid ${windowId}`, { timeout: 2000 });
+    const pid = parseInt(stdout.trim());
+    return pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 杀掉 Cursor 进程及其子进程
+ * 先 SIGTERM 优雅退出，1.5秒后 SIGKILL 强制杀死
+ */
+function killProcessTree(pid: number): void {
+  log(`[Kill] Killing Cursor process tree: PID ${pid}`);
+  
+  // 先发 SIGTERM（给 Cursor 保存状态的机会）
+  try {
+    // pkill -P 杀子进程，kill 杀主进程
+    exec(`kill -TERM ${pid} 2>/dev/null; pkill -TERM -P ${pid} 2>/dev/null`);
+  } catch { /* 忽略 */ }
+  
+  // 1.5秒后强制 SIGKILL（确保彻底清理）
+  setTimeout(() => {
+    try {
+      process.kill(pid, 0); // 检查是否还活着
+      log(`[Kill] PID ${pid} still alive after SIGTERM, force killing`);
+      try { execSync(`pkill -9 -P ${pid} 2>/dev/null || true`, { timeout: 2000 }); } catch {}
+      try { execSync(`kill -9 ${pid} 2>/dev/null || true`, { timeout: 2000 }); } catch {}
+    } catch {
+      // 进程已退出，OK
+    }
+  }, 1500);
+}
+
+/**
+ * 关闭嵌入窗口并杀掉 Cursor 进程
  */
 export async function closeEmbeddedWindowLinux(paneId: string): Promise<boolean> {
   const info = embeddedWindows.get(paneId);
   if (!info) return false;
   
+  log(`[Close] Closing pane=${paneId}, windowId=${info.windowId}`);
+  
+  // 1. 获取实际的 Cursor 进程 PID（在关窗口之前，否则窗口没了就拿不到了）
+  const pid = await getWindowPid(info.windowId);
+  
+  // 2. 关闭窗口
   const result = await closeWindow(info.windowId);
+  
+  // 3. 杀掉 Cursor 进程（避免幽灵进程残留，导致重开时窗口混乱）
+  if (pid) {
+    killProcessTree(pid);
+  }
+  
+  // 4. 清理跟踪状态
   embeddedWindows.delete(paneId);
+  knownCursorWindowIds.delete(info.windowId);
+  rejectedSmallWindows.delete(info.windowId);
+  
+  log(`[Close] Done: pane=${paneId}, pid=${pid}, remaining=${embeddedWindows.size}`);
   return result;
 }
 
@@ -841,21 +1055,28 @@ export function getAllEmbeddedPaneIds(): string[] {
 }
 
 /**
- * 提升所有嵌入窗口到前面（异步非阻塞）
+ * 提升所有嵌入窗口到主窗口之上（同步 X11 API，立即生效）
+ * 不使用全局 ABOVE（避免遮挡其他程序如 Chrome）
  */
 export function raiseAllEmbeddedWindows(): void {
-  const windowIds = Array.from(embeddedWindows.values()).map((info) => info.windowId);
-  if (windowIds.length === 0) return;
+  // 只提升非 reparented 窗口（reparented 窗口已经是主窗口的子窗口，自动在上面）
+  const nonReparentedIds = Array.from(embeddedWindows.values())
+    .filter(info => !info.reparented)
+    .map(info => info.windowId);
+  if (nonReparentedIds.length === 0) return;
 
-  // 先请求置顶（ABOVE），避免主窗口获得焦点后遮挡
-  for (const id of windowIds) {
-    requestNetWmState(id, '_NET_WM_STATE_ABOVE', 1);
-    requestNetWmState(id, '_NET_WM_STATE_STAYS_ON_TOP', 1);
+  // 优先使用同步 X11 API（立即生效，无 spawn 延迟）
+  if (x11 && x11Display) {
+    for (const id of nonReparentedIds) {
+      raiseWindowX11(id);
+    }
+    x11.XFlush(x11Display);
+    return;
   }
 
-  // 单次调用批量 raise，避免 N 次 spawn
+  // 兜底：使用 xdotool（异步）
   const args: string[] = [];
-  for (const id of windowIds) {
+  for (const id of nonReparentedIds) {
     args.push('windowraise', id);
   }
 
@@ -868,6 +1089,56 @@ export function raiseAllEmbeddedWindows(): void {
 }
 
 /**
+ * 最小化所有嵌入窗口（主窗口最小化时调用）
+ */
+export function minimizeAllWindows(): void {
+  // reparented 窗口跟随父窗口自动最小化，只需处理非 reparented 的
+  const nonReparentedIds = Array.from(embeddedWindows.values())
+    .filter(info => !info.reparented)
+    .map(info => info.windowId);
+  if (nonReparentedIds.length === 0) return;
+
+  log(`[minimize] Minimizing ${nonReparentedIds.length} non-reparented embedded windows`);
+  
+  const args: string[] = [];
+  for (const id of nonReparentedIds) {
+    args.push('windowminimize', id);
+  }
+
+  try {
+    const child = spawn('xdotool', args, { stdio: 'ignore', detached: true });
+    child.unref();
+  } catch (e: any) {
+    log(`[minimize] FAILED: ${e.message}`);
+  }
+}
+
+/**
+ * 恢复所有嵌入窗口（主窗口从最小化恢复时调用）
+ */
+export function restoreAllWindows(): void {
+  // reparented 窗口跟随父窗口自动恢复，只需处理非 reparented 的
+  const nonReparentedIds = Array.from(embeddedWindows.values())
+    .filter(info => !info.reparented)
+    .map(info => info.windowId);
+  if (nonReparentedIds.length === 0) return;
+
+  log(`[restore] Restoring ${nonReparentedIds.length} non-reparented embedded windows`);
+  
+  const args: string[] = [];
+  for (const id of nonReparentedIds) {
+    args.push('windowactivate', id);
+  }
+
+  try {
+    const child = spawn('xdotool', args, { stdio: 'ignore', detached: true });
+    child.unref();
+  } catch (e: any) {
+    log(`[restore] FAILED: ${e.message}`);
+  }
+}
+
+/**
  * 检查是否支持 Linux 窗口嵌入
  */
 export async function isLinuxEmbedSupported(): Promise<boolean> {
@@ -876,43 +1147,74 @@ export async function isLinuxEmbedSupported(): Promise<boolean> {
 }
 
 /**
- * 清理所有嵌入窗口
+ * 清理所有嵌入窗口（异步版）
  */
 export async function cleanupAllWindows(): Promise<void> {
   for (const [paneId, info] of embeddedWindows) {
     try {
+      const pid = await getWindowPid(info.windowId);
       await closeWindow(info.windowId);
+      if (pid) killProcessTree(pid);
     } catch (e) {
       console.error(`[Linux] Failed to close window for pane ${paneId}:`, e);
     }
   }
   embeddedWindows.clear();
+  knownCursorWindowIds.clear();
+  rejectedSmallWindows.clear();
 }
 
 /**
  * 同步清理所有嵌入窗口（用于主窗口关闭时）
+ * ★ 必须全部同步执行：应用即将退出，setTimeout/异步回调不会执行
  */
 export function cleanupAllWindowsSync(): void {
-  const windowIds = Array.from(embeddedWindows.values()).map((info) => info.windowId);
-  if (windowIds.length === 0) return;
+  const entries = Array.from(embeddedWindows.entries());
+  if (entries.length === 0) return;
   
-  console.log(`[Linux] Closing ${windowIds.length} embedded windows...`);
+  log(`[Cleanup] Closing ${entries.length} embedded windows and killing processes...`);
   
-  try {
-    // 批量关闭所有窗口
-    for (const windowId of windowIds) {
-      try {
-        execSync(`xdotool windowclose ${windowId}`, { timeout: 1000 });
-        console.log(`[Linux] Closed window: ${windowId}`);
-      } catch (e: any) {
-        console.error(`[Linux] Failed to close window ${windowId}:`, e.message);
-      }
+  // 1. 先收集所有窗口的 PID（必须在关窗口之前获取，关窗后拿不到 PID）
+  const pidsToKill: number[] = [];
+  for (const [, info] of entries) {
+    try {
+      const stdout = execSync(`xdotool getwindowpid ${info.windowId}`, { timeout: 1000 }).toString().trim();
+      const pid = parseInt(stdout);
+      if (pid > 0) pidsToKill.push(pid);
+    } catch {
+      // 窗口可能已经不存在
     }
-  } catch (e: any) {
-    console.error(`[Linux] Failed to cleanup windows:`, e.message);
   }
   
+  // 2. 关闭所有窗口
+  for (const [, info] of entries) {
+    try {
+      execSync(`xdotool windowclose ${info.windowId}`, { timeout: 1000 });
+    } catch {
+      // 忽略
+    }
+  }
+  
+  // 3. 立即强制杀掉所有 Cursor 进程（SIGKILL，同步执行）
+  //    不能用 setTimeout（应用正在退出，回调不会执行）
+  //    不能只用 SIGTERM（Cursor 不一定响应）
+  for (const pid of pidsToKill) {
+    log(`[Cleanup] Force killing Cursor PID: ${pid}`);
+    try {
+      // 先杀子进程（Cursor 的 renderer/extension host 等）
+      execSync(`pkill -9 -P ${pid} 2>/dev/null || true`, { timeout: 2000 });
+    } catch { /* 忽略 */ }
+    try {
+      // 再杀主进程
+      execSync(`kill -9 ${pid} 2>/dev/null || true`, { timeout: 2000 });
+    } catch { /* 忽略 */ }
+  }
+  
+  log(`[Cleanup] Done: killed ${pidsToKill.length} processes`);
+  
   embeddedWindows.clear();
+  knownCursorWindowIds.clear();
+  rejectedSmallWindows.clear();
 }
 
 /**

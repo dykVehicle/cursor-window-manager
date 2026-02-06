@@ -88,4 +88,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 通知主进程状态已保存
   stateSaved: () => ipcRenderer.invoke('state-saved'),
+  
+  // 鼠标穿透控制（Linux：让 pane 区域的点击直接到达子窗口）
+  setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.invoke('set-ignore-mouse-events', ignore),
 });

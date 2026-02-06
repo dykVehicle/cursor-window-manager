@@ -84,6 +84,8 @@ export interface ElectronAPI {
   onSaveStateBeforeClose: (callback: () => void) => void;
   // 通知主进程状态已保存
   stateSaved: () => Promise<boolean>;
+  // 鼠标穿透控制
+  setIgnoreMouseEvents: (ignore: boolean) => Promise<void>;
 }
 
 declare global {

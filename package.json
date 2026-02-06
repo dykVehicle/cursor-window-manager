@@ -42,7 +42,8 @@
       "target": [
         "AppImage"
       ],
-      "category": "Utility",
+      "icon": "assets/multi-cursor-logo.png",
+      "category": "Development;Utility",
       "maintainer": "dyk <dyk@example.com>"
     },
     "nsis": {
