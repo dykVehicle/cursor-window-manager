@@ -3,7 +3,8 @@ node_modules/
 
 # Build outputs
 dist/
-release/
+# release/win-unpacked/
+# release/builder-debug.yml
 
 # IDE
 .idea/
