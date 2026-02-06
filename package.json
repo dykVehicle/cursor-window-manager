@@ -1,7 +1,7 @@
 {
-  "name": "cursor-window-manager",
+  "name": "multi-cursor-manager",
   "version": "1.0.0",
-  "description": "跨平台Cursor多窗口管理工具 - 支持自由切分窗口、拖动调整布局",
+  "description": "Multi Cursor Manager - Cursor多窗口管理工具，支持自由切分窗口、嵌入管理、拖动调整布局",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
@@ -19,7 +19,7 @@
   },
   "build": {
     "appId": "com.cursor.window-manager",
-    "productName": "Cursor Window Manager",
+    "productName": "Multi Cursor Manager",
     "directories": {
       "output": "release"
     },

@@ -36,7 +36,7 @@ function ensureDataDirectory(): string {
 }
 
 const DATA_DIR = ensureDataDirectory();
-const LOG_FILE = path.join(DATA_DIR, 'cursor-window-manager.log');
+const LOG_FILE = path.join(DATA_DIR, 'multi-cursor-manager.log');
 
 // ============ 日志系统 ============
 function log(...args: any[]) {
@@ -53,7 +53,7 @@ function log(...args: any[]) {
 
 function clearLog() {
   try {
-    fs.writeFileSync(LOG_FILE, `=== Cursor Window Manager Log ===\nStarted at: ${new Date().toISOString()}\nLog file: ${LOG_FILE}\nData directory: ${DATA_DIR}\n\n`);
+    fs.writeFileSync(LOG_FILE, `=== Multi Cursor Manager Log ===\nStarted at: ${new Date().toISOString()}\nLog file: ${LOG_FILE}\nData directory: ${DATA_DIR}\n\n`);
   } catch (e) {
     console.error('Failed to clear log:', e);
   }
