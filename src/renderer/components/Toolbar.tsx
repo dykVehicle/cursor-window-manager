@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { SavedLayout, WindowLayout, PaneConfig } from '../types';
+import { SavedLayout, WindowLayout, SubCursorConfig } from '../types';
 
 declare global {
   interface Window {
@@ -19,16 +19,16 @@ declare global {
 type LayoutPreset = 'single' | 'dual-h' | 'dual-v' | 'triple' | 'quad' | 'six' | 'eight';
 
 interface ToolbarProps {
-  onAddPane: () => void;
+  onAddSubCursor: () => void;
   onResetLayout: () => void;
   onApplyPreset: (preset: LayoutPreset) => void;
   onOpenSettings: () => void;
   currentLayout: WindowLayout;
-  currentPanes: Record<string, PaneConfig>;
-  onLoadLayout: (layout: WindowLayout, panes: Record<string, PaneConfig>) => void;
+  currentSubCursors: Record<string, SubCursorConfig>;
+  onLoadLayout: (layout: WindowLayout, subCursors: Record<string, SubCursorConfig>) => void;
 }
 
-function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, currentLayout, currentPanes, onLoadLayout }: ToolbarProps) {
+function Toolbar({ onAddSubCursor, onResetLayout, onApplyPreset, onOpenSettings, currentLayout, currentSubCursors, onLoadLayout }: ToolbarProps) {
   const [savedLayouts, setSavedLayouts] = useState<SavedLayout[]>([]);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
@@ -75,7 +75,7 @@ function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, curr
 
   const handleSaveLayout = async () => {
     if (!layoutName.trim()) return;
-    await window.electronAPI.saveLayoutAs(layoutName.trim(), currentLayout, currentPanes);
+    await window.electronAPI.saveLayoutAs(layoutName.trim(), currentLayout, currentSubCursors);
     setLayoutName('');
     setShowSaveDialog(false);
     window.electronAPI.showAllEmbeddedWindows();
@@ -88,7 +88,7 @@ function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, curr
   };
 
   const handleLoadLayout = (saved: SavedLayout) => {
-    onLoadLayout(saved.layout, saved.panes);
+    onLoadLayout(saved.layout, saved.subCursors);
     setShowLayoutMenu(false);
   };
   return (
@@ -109,7 +109,7 @@ function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, curr
         <button
           className="preset-button"
           onClick={() => onApplyPreset('single')}
-          data-tooltip="单窗格"
+          data-tooltip="单屏"
         >
           <SingleLayoutIcon />
         </button>
@@ -130,28 +130,28 @@ function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, curr
         <button
           className="preset-button"
           onClick={() => onApplyPreset('triple')}
-          data-tooltip="三窗格"
+          data-tooltip="三分屏"
         >
           <TripleLayoutIcon />
         </button>
         <button
           className="preset-button"
           onClick={() => onApplyPreset('quad')}
-          data-tooltip="四窗格"
+          data-tooltip="四分屏"
         >
           <QuadLayoutIcon />
         </button>
         <button
           className="preset-button"
           onClick={() => onApplyPreset('six')}
-          data-tooltip="六窗格"
+          data-tooltip="六分屏"
         >
           <SixLayoutIcon />
         </button>
         <button
           className="preset-button"
           onClick={() => onApplyPreset('eight')}
-          data-tooltip="八窗格"
+          data-tooltip="八分屏"
         >
           <EightLayoutIcon />
         </button>
@@ -160,9 +160,9 @@ function Toolbar({ onAddPane, onResetLayout, onApplyPreset, onOpenSettings, curr
       <div className="toolbar-divider" />
 
       {/* 操作按钮 */}
-      <button className="btn-secondary" onClick={onAddPane} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+      <button className="btn-secondary" onClick={onAddSubCursor} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <PlusIcon />
-        添加窗格
+        添加 Sub Cursor
       </button>
 
       <button className="btn-secondary" onClick={onResetLayout} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>

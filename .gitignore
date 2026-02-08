@@ -3,7 +3,11 @@ node_modules/
 
 # Build outputs
 dist/
-release/
+# release 目录：忽略中间文件，但保留最终产物
+release/*
+!release/*.AppImage
+!release/*.exe
+!release/*.tar.xz
 
 # IDE
 .idea/

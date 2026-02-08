@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, screen, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, shell, nativeImage } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import Store from 'electron-store';
 import { spawn, ChildProcess, exec, execSync } from 'child_process';
-import { WindowLayout, PaneConfig, AppConfig } from './types';
+import { WindowLayout, SubCursorConfig, AppConfig } from './types';
 
 // Linux 窗口嵌入模块
 import * as linuxEmbed from './linuxWindowEmbed';
@@ -11,10 +11,19 @@ import * as linuxEmbed from './linuxWindowEmbed';
 // ============ 获取程序运行目录 ============
 // 获取程序运行的实际目录（而不是用户数据目录）
 function getAppDirectory(): string {
-  // 打包后：返回可执行文件所在目录
-  // 开发时：返回项目根目录
   if (app.isPackaged) {
-    // 获取可执行文件所在目录
+    if (process.platform === 'linux') {
+      // Linux AppImage 运行时 exe 位于只读的 /tmp/.mount_xxx/ 目录
+      // 优先使用 APPIMAGE 环境变量指向的实际 AppImage 文件所在目录
+      // 否则回退到 ~/.config/multi-cursor-manager/
+      const appImagePath = process.env.APPIMAGE;
+      if (appImagePath) {
+        return path.dirname(appImagePath);
+      }
+      // 非 AppImage 的 Linux 打包（如 deb/snap），使用用户配置目录
+      return path.join(process.env.HOME || '/tmp', '.config', 'multi-cursor-manager');
+    }
+    // Windows: 返回可执行文件所在目录（portable 模式，配置跟随程序）
     return path.dirname(app.getPath('exe'));
   } else {
     // 开发模式下使用项目根目录
@@ -80,11 +89,21 @@ const store = new Store<AppConfig>({
   defaults: {
     layout: {
       direction: 'row',
-      first: 'pane-1',
-      second: 'pane-2',
+      first: {
+        direction: 'column',
+        first: 'sub-cursor-1',
+        second: 'sub-cursor-3',
+        splitPercentage: 50,
+      },
+      second: {
+        direction: 'column',
+        first: 'sub-cursor-2',
+        second: 'sub-cursor-4',
+        splitPercentage: 50,
+      },
       splitPercentage: 50,
     },
-    panes: {},
+    subCursors: {},
     windowBounds: {
       width: 1400,
       height: 900,
@@ -104,8 +123,8 @@ const embeddedWindows: Map<string, EmbeddedWindowInfo> = new Map();
 
 // 嵌入队列 - 确保嵌入操作顺序执行
 interface EmbedTask {
-  paneId: string;
-  paneBounds: { x: number; y: number; width: number; height: number; dpr?: number };
+  subCursorId: string;
+  subCursorBounds: { x: number; y: number; width: number; height: number; dpr?: number };
   parentHwndBuffer: Buffer;
   parentHwndNumber: number;
   targetPid?: number; // 目标进程 PID，用于精确匹配
@@ -121,7 +140,7 @@ async function processEmbedQueue() {
   isEmbedding = true;
   const task = embedQueue.shift()!;
   
-  log(`[EmbedQueue] Processing task for pane: ${task.paneId}, queue remaining: ${embedQueue.length}`);
+  log(`[EmbedQueue] Processing task for sub-cursor: ${task.subCursorId}, queue remaining: ${embedQueue.length}`);
   
   try {
     const maxAttempts = 15;
@@ -129,29 +148,29 @@ async function processEmbedQueue() {
     let embedSucceeded = false;
     
     for (let attempt = 1; attempt <= maxAttempts && !embedSucceeded; attempt++) {
-      log(`[EmbedQueue] Attempt ${attempt}/${maxAttempts} for pane: ${task.paneId}`);
+      log(`[EmbedQueue] Attempt ${attempt}/${maxAttempts} for sub-cursor: ${task.subCursorId}`);
       
       // 获取已嵌入的窗口列表
       const existingHwnds = Array.from(embeddedWindows.values()).map(info => info.hwnd);
       
       // 计算屏幕坐标：转换为物理像素（Per-Monitor V2 模式）
-      let screenBounds = { x: 0, y: 0, width: task.paneBounds.width, height: task.paneBounds.height };
+      let screenBounds = { x: 0, y: 0, width: task.subCursorBounds.width, height: task.subCursorBounds.height };
       if (mainWindow) {
         const contentBounds = mainWindow.getContentBounds();
         const display = screen.getDisplayMatching(mainWindow.getBounds());
         const scaleFactor = display.scaleFactor || 1;
         
-        // 计算 pane 左上角和右下角的 DIP 坐标
+        // 计算 sub-cursor 左上角和右下角的 DIP 坐标
         const dipTopLeft = { 
-          x: contentBounds.x + task.paneBounds.x, 
-          y: contentBounds.y + task.paneBounds.y 
+          x: contentBounds.x + task.subCursorBounds.x, 
+          y: contentBounds.y + task.subCursorBounds.y 
         };
         let dipBottomRight = { 
-          x: contentBounds.x + task.paneBounds.x + task.paneBounds.width, 
-          y: contentBounds.y + task.paneBounds.y + task.paneBounds.height 
+          x: contentBounds.x + task.subCursorBounds.x + task.subCursorBounds.width, 
+          y: contentBounds.y + task.subCursorBounds.y + task.subCursorBounds.height 
         };
         
-        // 确保 pane 右下角不超出主窗口内容区域，预留边框宽度
+        // 确保 sub-cursor 右下角不超出主窗口内容区域，预留边框宽度
         const borderWidth = 3;
         const contentRight = contentBounds.x + contentBounds.width - borderWidth;
         const contentBottom = contentBounds.y + contentBounds.height - borderWidth;
@@ -177,21 +196,21 @@ async function processEmbedQueue() {
       
       if (result.success && result.hwnd) {
         embedSucceeded = true;
-        log(`[EmbedQueue] SUCCESS for pane: ${task.paneId}, hwnd: ${result.hwnd}`);
-        embeddedWindows.set(task.paneId, { hwnd: result.hwnd, parentHwnd: task.parentHwndNumber });
-        mainWindow?.webContents.send('cursor-embedded', task.paneId, result.hwnd);
+        log(`[EmbedQueue] SUCCESS for sub-cursor: ${task.subCursorId}, hwnd: ${result.hwnd}`);
+        embeddedWindows.set(task.subCursorId, { hwnd: result.hwnd, parentHwnd: task.parentHwndNumber });
+        mainWindow?.webContents.send('cursor-embedded', task.subCursorId, result.hwnd);
       } else {
         log(`[EmbedQueue] Attempt failed: ${result.error?.substring(0, 100)}`);
         if (attempt < maxAttempts) {
           await new Promise(r => setTimeout(r, delayBetweenAttempts));
         } else {
-          mainWindow?.webContents.send('cursor-error', task.paneId, 'Timeout: ' + (result.error || 'Window not found'));
+          mainWindow?.webContents.send('cursor-error', task.subCursorId, 'Timeout: ' + (result.error || 'Window not found'));
         }
       }
     }
   } catch (e: any) {
     log(`[EmbedQueue] Error: ${e.message}`);
-    mainWindow?.webContents.send('cursor-error', task.paneId, e.message);
+    mainWindow?.webContents.send('cursor-error', task.subCursorId, e.message);
   }
   
   task.resolve();
@@ -205,7 +224,7 @@ async function processEmbedQueue() {
 function queueEmbedTask(task: Omit<EmbedTask, 'resolve'>): Promise<void> {
   return new Promise((resolve) => {
     embedQueue.push({ ...task, resolve });
-    log(`[EmbedQueue] Task added for pane: ${task.paneId}, queue length: ${embedQueue.length}`);
+    log(`[EmbedQueue] Task added for sub-cursor: ${task.subCursorId}, queue length: ${embedQueue.length}`);
     processEmbedQueue();
   });
 }
@@ -443,7 +462,7 @@ async function resizeEmbeddedWindowWithPowerShell(
   const display = screen.getDisplayMatching(mainWindow.getBounds());
   const scaleFactor = display.scaleFactor || 1;
   
-  // 计算 pane 左上角和右下角的 DIP 坐标
+  // 计算 sub-cursor 左上角和右下角的 DIP 坐标
   const dipTopLeft = { 
     x: contentBounds.x + bounds.x, 
     y: contentBounds.y + bounds.y 
@@ -458,7 +477,7 @@ async function resizeEmbeddedWindowWithPowerShell(
   const contentRight = contentBounds.x + contentBounds.width - borderWidth;
   const contentBottom = contentBounds.y + contentBounds.height - borderWidth;
   
-  // 确保 pane 右下角不超出主窗口内容区域（裁剪到边框内侧）
+  // 确保 sub-cursor 右下角不超出主窗口内容区域（裁剪到边框内侧）
   dipBottomRight = {
     x: Math.min(dipBottomRight.x, contentRight),
     y: Math.min(dipBottomRight.y, contentBottom)
@@ -480,7 +499,7 @@ async function resizeEmbeddedWindowWithPowerShell(
   return psWrite(cmd);
 }
 
-// 使用常驻 PowerShell 聚焦窗口（用于用户点击特定 pane 时）
+// 使用常驻 PowerShell 聚焦窗口（用于用户点击特定 sub-cursor 时）
 function focusWindowWithPowerShell(hwnd: number, _parentHwnd: number) {
   if (!psProcess || !psReady) {
     log(`[Focus] PS not ready for hwnd=${hwnd}, will retry in 100ms`);
@@ -556,12 +575,12 @@ function getCursorPath(): string {
   return 'cursor';
 }
 
-// 存储每个 pane 的相对位置（用于 Linux 直接同步优化 + 输入穿透区域计算）
+// 存储每个 sub-cursor 的相对位置（用于 Linux 直接同步优化 + 输入穿透区域计算）
 // 这些位置由渲染进程在 resize 时更新
-const paneRelativePositions: Map<string, { x: number; y: number; width: number; height: number }> = new Map();
+const subCursorRelativePositions: Map<string, { x: number; y: number; width: number; height: number }> = new Map();
 
 // Linux: 更新主窗口输入穿透区域（XShape ShapeInput）
-// 在主窗口对应 pane 区域打"输入穿透洞"，让鼠标事件穿透到浮动的 Cursor 窗口
+// 在主窗口对应 sub-cursor 区域打"输入穿透洞"，让鼠标事件穿透到浮动的 Cursor 窗口
 let inputShapeUpdateTimer: NodeJS.Timeout | null = null;
 function scheduleInputShapeUpdate(): void {
   if (process.platform !== 'linux' || !mainWindow) return;
@@ -572,9 +591,9 @@ function scheduleInputShapeUpdate(): void {
     
     // 检查是否有非 reparented 的嵌入窗口需要 XShape
     let hasNonReparented = false;
-    for (const [paneId] of paneRelativePositions) {
-      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
-      if (info && !linuxEmbed.isWindowReparented(paneId)) {
+    for (const [scId] of subCursorRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(scId);
+      if (info && !linuxEmbed.isWindowReparented(scId)) {
         hasNonReparented = true;
         break;
       }
@@ -589,9 +608,9 @@ function scheduleInputShapeUpdate(): void {
     const offsetY = contentBounds.y - winBounds.y;
     
     const excludeRegions: Array<{x: number, y: number, width: number, height: number}> = [];
-    for (const [paneId, relPos] of paneRelativePositions) {
-      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
-      if (info && !linuxEmbed.isWindowReparented(paneId)) {
+    for (const [scId, relPos] of subCursorRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(scId);
+      if (info && !linuxEmbed.isWindowReparented(scId)) {
         excludeRegions.push({
           x: relPos.x + offsetX,
           y: relPos.y + offsetY,
@@ -615,6 +634,18 @@ function createWindow(): void {
   const bounds = store.get('windowBounds');
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
 
+  // 获取图标路径
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath || '', 'assets', 'multi-cursor-logo.png')
+    : path.join(__dirname, '..', '..', 'assets', 'multi-cursor-logo.png');
+
+  log('Icon path:', iconPath);
+  log('Icon file exists:', fs.existsSync(iconPath));
+
+  // 使用 nativeImage 显式加载图标，确保 Linux 下正确显示
+  const appIcon = nativeImage.createFromPath(iconPath);
+  log('Icon loaded:', !appIcon.isEmpty(), 'size:', appIcon.getSize());
+
   mainWindow = new BrowserWindow({
     width: bounds.width || 1400,
     height: bounds.height || 900,
@@ -624,6 +655,7 @@ function createWindow(): void {
     minHeight: 600,
     frame: false,
     titleBarStyle: 'hidden',
+    icon: iconPath,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -631,6 +663,30 @@ function createWindow(): void {
       devTools: true,
     },
   });
+
+  // Linux: Electron 在 frame:false 模式下不会正确设置 _NET_WM_ICON
+  // 使用 koffi + X11 直接设置窗口图标（无需 Python 依赖，可在任何 Linux 上工作）
+  if (process.platform === 'linux') {
+    try {
+      mainWindow.setIcon(iconPath);
+      log('Icon set via setIcon() after window creation');
+    } catch (e: any) {
+      log('setIcon error:', e.message);
+    }
+    
+    // 延迟使用 X11 API 直接设置 _NET_WM_ICON（等待窗口完全创建）
+    setTimeout(() => {
+      if (!mainWindow) return;
+      try {
+        const x11Id = mainWindow.getNativeWindowHandle().readUInt32LE(0);
+        log(`[Icon] Setting _NET_WM_ICON via koffi+X11: x11Id=${x11Id}`);
+        const result = linuxEmbed.setWindowIconX11(x11Id, iconPath);
+        log(`[Icon] setWindowIconX11 result: ${result}`);
+      } catch (e: any) {
+        log('[Icon] Failed to set X11 icon:', e.message);
+      }
+    }, 500);
+  }
 
   // 调试时打开开发者工具（生产环境注释掉）
   // mainWindow.webContents.openDevTools();
@@ -672,7 +728,7 @@ function createWindow(): void {
     const bounds = mainWindow.getBounds();
     store.set('windowBounds', bounds);
     
-    // 通知渲染器保存当前 pane 状态（包括运行中的 Cursor 项目）
+    // 通知渲染器保存当前 sub-cursor 状态（包括运行中的 Cursor 项目）
     // 这样下次启动时可以自动恢复
     mainWindow.webContents.send('save-state-before-close');
     
@@ -680,8 +736,8 @@ function createWindow(): void {
     if (process.platform === 'win32' && psProcess && psReady && embeddedWindows.size > 0) {
       log('[Cleanup] Closing all embedded Cursor windows before exit (Windows)...');
       
-      for (const [paneId, info] of embeddedWindows) {
-        log(`[Cleanup] Sending WM_CLOSE to: paneId=${paneId}, hwnd=${info.hwnd}`);
+      for (const [scId, info] of embeddedWindows) {
+        log(`[Cleanup] Sending WM_CLOSE to: subCursorId=${scId}, hwnd=${info.hwnd}`);
         // 使用 PostMessage 发送 WM_CLOSE（异步，不等待响应）
         psWrite(`[WinAPI]::PostMessage([IntPtr]${info.hwnd},$global:WM_CLOSE,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null\n`);
       }
@@ -721,11 +777,11 @@ function createWindow(): void {
     }, 1000);
   });
   
-  // paneRelativePositions 和 scheduleInputShapeUpdate 已移到模块级别（供 IPC handlers 使用）
+  // subCursorRelativePositions 和 scheduleInputShapeUpdate 已移到模块级别（供 IPC handlers 使用）
   
-  // 导出更新 pane 位置的方法（供 IPC 处理程序使用）
-  (mainWindow as any).updatePanePosition = (paneId: string, pos: { x: number; y: number; width: number; height: number }) => {
-    paneRelativePositions.set(paneId, pos);
+  // 导出更新 sub-cursor 位置的方法（供 IPC 处理程序使用）
+  (mainWindow as any).updateSubCursorPosition = (subCursorId: string, pos: { x: number; y: number; width: number; height: number }) => {
+    subCursorRelativePositions.set(subCursorId, pos);
   };
   
   // 调试计数器
@@ -740,7 +796,7 @@ function createWindow(): void {
   
   function syncLinuxEmbeddedWindows(): void {
     if (!mainWindow) return;
-    if (paneRelativePositions.size === 0) return;
+    if (subCursorRelativePositions.size === 0) return;
     
     const contentBounds = mainWindow.getContentBounds();
     
@@ -763,12 +819,12 @@ function createWindow(): void {
     
     const ops: Array<{ windowId: string; x: number; y: number; width: number; height: number }> = [];
     
-    for (const [paneId, relPos] of paneRelativePositions) {
-      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+    for (const [scId, relPos] of subCursorRelativePositions) {
+      const info = linuxEmbed.getEmbeddedWindowInfo(scId);
       if (!info) continue;
       
       // reparent 模式下子窗口自动跟随父窗口移动，不需要重新定位
-      if (linuxEmbed.isWindowReparented(paneId)) continue;
+      if (linuxEmbed.isWindowReparented(scId)) continue;
       
       ops.push({
         windowId: info.windowId,
@@ -822,7 +878,7 @@ function createWindow(): void {
       // 每秒打印一次调试日志
       if (now - lastMoveLogTime > 1000) {
         const contentBounds = mainWindow.getContentBounds();
-        log(`[Move] event#${moveEventCount}, panePositions.size=${paneRelativePositions.size}, contentBounds=(${contentBounds.x},${contentBounds.y})`);
+        log(`[Move] event#${moveEventCount}, panePositions.size=${subCursorRelativePositions.size}, contentBounds=(${contentBounds.x},${contentBounds.y})`);
         lastMoveLogTime = now;
       }
       // 启动/续命高频同步循环（批量移动 + 限速）
@@ -882,10 +938,10 @@ function createWindow(): void {
     if (process.platform === 'linux') {
       // 更新 XShape 输入穿透区域
       scheduleInputShapeUpdate();
-      // ★ 关键：通知渲染进程重新计算所有 pane 的位置
-      // resize 会改变 pane 的 CSS 布局，必须由渲染进程 getBoundingClientRect() 获取新坐标
+      // ★ 关键：通知渲染进程重新计算所有 sub-cursor 的位置
+      // resize 会改变 sub-cursor 的 CSS 布局，必须由渲染进程 getBoundingClientRect() 获取新坐标
       // 然后通过 resizeEmbeddedWindow IPC 传回主进程更新浮动窗口位置
-      // （注意：move 事件不需要此通知，因为 move 不改变 pane 相对位置，主进程直接同步即可）
+      // （注意：move 事件不需要此通知，因为 move 不改变 sub-cursor 相对位置，主进程直接同步即可）
       mainWindow?.webContents.send('window-moved');
       // 直接提升所有浮动窗口（resize 时 WM 可能将主窗口覆盖到浮动窗口之上）
       linuxEmbed.raiseAllEmbeddedWindows();
@@ -928,14 +984,14 @@ ipcMain.handle('save-layout', (_event, layout: WindowLayout) => {
   return true;
 });
 
-// 获取窗格配置
-ipcMain.handle('get-panes', () => {
-  return store.get('panes');
+// 获取 Sub Cursor 配置
+ipcMain.handle('get-sub-cursors', () => {
+  return store.get('subCursors');
 });
 
-// 保存窗格配置
-ipcMain.handle('save-panes', (_event, panes: Record<string, PaneConfig>) => {
-  store.set('panes', panes);
+// 保存 Sub Cursor 配置
+ipcMain.handle('save-sub-cursors', (_event, subCursors: Record<string, SubCursorConfig>) => {
+  store.set('subCursors', subCursors);
   return true;
 });
 
@@ -981,26 +1037,26 @@ ipcMain.handle('select-cursor-file', async () => {
   return null;
 });
 
-// 打开Cursor实例并嵌入到窗格中
-ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number; dpr?: number }) => {
+// 打开Cursor实例并嵌入到 Sub Cursor 中
+ipcMain.handle('open-cursor', async (_event, subCursorId: string, folderPath?: string, subCursorBounds?: { x: number; y: number; width: number; height: number; dpr?: number }) => {
   const cursorPath = getCursorPath();
   
   log('');
   log('========================================');
   log('=== Opening Cursor ===');
   log('========================================');
-  log('Pane ID:', paneId);
+  log('Sub Cursor ID:', subCursorId);
   log('Cursor path:', cursorPath);
   log('Cursor exists:', fileExists(cursorPath));
   log('Folder path:', folderPath);
-  log('Pane bounds:', paneBounds);
+  log('Sub Cursor bounds:', subCursorBounds);
   log('Platform:', process.platform);
   
   // 检查Cursor是否存在
   if (!fileExists(cursorPath)) {
     const errorMsg = `Cursor not found at: ${cursorPath}. Please set the correct path in Settings.`;
     log('ERROR:', errorMsg);
-    mainWindow?.webContents.send('cursor-error', paneId, errorMsg);
+    mainWindow?.webContents.send('cursor-error', subCursorId, errorMsg);
     return { success: false, error: errorMsg };
   }
   
@@ -1028,10 +1084,10 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
       
       if (cursorPid) {
         // 保存进程引用和 PID
-        cursorProcesses.set(paneId, cursorProcess);
+        cursorProcesses.set(subCursorId, cursorProcess);
         
         // 等待 Cursor 窗口出现并嵌入（使用队列确保顺序执行）
-        if (paneBounds && mainWindow) {
+        if (subCursorBounds && mainWindow) {
           // 获取主窗口句柄
           const parentHwndBuffer = mainWindow.getNativeWindowHandle();
           log('Parent window handle buffer:', parentHwndBuffer.toString('hex'));
@@ -1047,15 +1103,15 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
           // 延迟后加入队列，让 Cursor 有时间启动
           setTimeout(() => {
             queueEmbedTask({
-              paneId,
-              paneBounds,
+              subCursorId,
+              subCursorBounds,
               parentHwndBuffer,
               parentHwndNumber,
               targetPid: cursorPid, // 传递 PID 用于精确匹配
             });
           }, 2000);
         } else {
-          log('No paneBounds or mainWindow, skipping embed');
+          log('No subCursorBounds or mainWindow, skipping embed');
         }
       }
       
@@ -1084,23 +1140,23 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
       log('Cursor started with PID:', cursorPid);
       
       if (cursorPid) {
-        cursorProcesses.set(paneId, proc);
+        cursorProcesses.set(subCursorId, proc);
         
         // 尝试嵌入窗口
-        if (paneBounds && mainWindow) {
+        if (subCursorBounds && mainWindow) {
           // 延迟后尝试嵌入，让 Cursor 有时间启动并创建窗口
           setTimeout(async () => {
-            log(`[Linux] Starting embed process for pane: ${paneId}`);
-            const result = await linuxEmbed.embedWindowLinux(paneId, cursorPid, mainWindow!, paneBounds);
+            log(`[Linux] Starting embed process for sub-cursor: ${subCursorId}`);
+            const result = await linuxEmbed.embedWindowLinux(subCursorId, cursorPid, mainWindow!, subCursorBounds);
             
             if (result.success && result.windowId) {
-              log(`[Linux] Embed SUCCESS for pane: ${paneId}, windowId: ${result.windowId}`);
-              mainWindow?.webContents.send('cursor-embedded', paneId, result.windowId);
+              log(`[Linux] Embed SUCCESS for sub-cursor: ${subCursorId}, windowId: ${result.windowId}`);
+              mainWindow?.webContents.send('cursor-embedded', subCursorId, result.windowId);
               linuxEmbed.raiseAllEmbeddedWindows();
               scheduleInputShapeUpdate();
             } else {
-              log(`[Linux] Embed FAILED for pane: ${paneId}, error: ${result.error}`);
-              mainWindow?.webContents.send('cursor-error', paneId, result.error || 'Failed to embed window');
+              log(`[Linux] Embed FAILED for sub-cursor: ${subCursorId}, error: ${result.error}`);
+              mainWindow?.webContents.send('cursor-error', subCursorId, result.error || 'Failed to embed window');
             }
           }, 1000); // 1秒后开始查找窗口（findNewCursorWindow 内部会继续轮询）
         }
@@ -1108,15 +1164,15 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
 
       proc.on('exit', (code) => {
         // Cursor 使用 fork 模式，主进程会立即退出，这是正常的
-        log(`Cursor launcher process ${paneId} exited with code:`, code);
-        cursorProcesses.delete(paneId);
+        log(`Cursor launcher process ${subCursorId} exited with code:`, code);
+        cursorProcesses.delete(subCursorId);
         // 不要在这里删除 embeddedWindow，因为窗口可能仍在运行
       });
 
       proc.on('error', (err) => {
         log(`Failed to start Cursor: ${err.message}`);
-        cursorProcesses.delete(paneId);
-        mainWindow?.webContents.send('cursor-error', paneId, err.message);
+        cursorProcesses.delete(subCursorId);
+        mainWindow?.webContents.send('cursor-error', subCursorId, err.message);
       });
 
       return { success: true, pid: cursorPid };
@@ -1135,7 +1191,7 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
       });
       
       proc.unref();
-      cursorProcesses.set(paneId, proc);
+      cursorProcesses.set(subCursorId, proc);
       
       log('Cursor started with PID:', proc.pid);
 
@@ -1149,26 +1205,26 @@ ipcMain.handle('open-cursor', async (_event, paneId: string, folderPath?: string
 });
 
 // 调整嵌入窗口大小
-ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: { x: number; y: number; width: number; height: number; dpr?: number }) => {
+ipcMain.handle('resize-embedded-window', async (_event, subCursorId: string, bounds: { x: number; y: number; width: number; height: number; dpr?: number }) => {
   if (process.platform === 'win32') {
     // Windows: 使用 PowerShell
-    const info = embeddedWindows.get(paneId);
-    log(`[IPC resize-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}, dpr=${bounds.dpr}, bounds=`, bounds);
+    const info = embeddedWindows.get(subCursorId);
+    log(`[IPC resize-embedded-window] subCursorId=${subCursorId}, hwnd=${info?.hwnd}, dpr=${bounds.dpr}, bounds=`, bounds);
     if (info) {
       return await resizeEmbeddedWindowWithPowerShell(info.hwnd, bounds);
     }
-    log(`[IPC resize-embedded-window] No hwnd found for paneId=${paneId}`);
+    log(`[IPC resize-embedded-window] No hwnd found for subCursorId=${subCursorId}`);
     return false;
   } else if (process.platform === 'linux') {
-    // Linux: 保存 pane 相对位置并同步窗口
+    // Linux: 保存 sub-cursor 相对位置并同步窗口
     if (mainWindow) {
       // 保存相对位置供主窗口移动时直接使用（避免 IPC 往返）
-      if ((mainWindow as any).updatePanePosition) {
-        (mainWindow as any).updatePanePosition(paneId, bounds);
-        log(`[IPC] Saved pane position: paneId=${paneId}, bounds=(${bounds.x},${bounds.y},${bounds.width}x${bounds.height})`);
+      if ((mainWindow as any).updateSubCursorPosition) {
+        (mainWindow as any).updateSubCursorPosition(subCursorId, bounds);
+        log(`[IPC] Saved sub-cursor position: subCursorId=${subCursorId}, bounds=(${bounds.x},${bounds.y},${bounds.width}x${bounds.height})`);
       }
       
-      const info = linuxEmbed.getEmbeddedWindowInfo(paneId);
+      const info = linuxEmbed.getEmbeddedWindowInfo(subCursorId);
       if (info) {
         // 浮动窗口模式：使用屏幕绝对坐标 + xdotool
         const contentBounds = mainWindow.getContentBounds();
@@ -1185,18 +1241,18 @@ ipcMain.handle('resize-embedded-window', async (_event, paneId: string, bounds: 
 });
 
 // 设置焦点到嵌入的窗口
-ipcMain.handle('focus-embedded-window', async (_event, paneId: string) => {
+ipcMain.handle('focus-embedded-window', async (_event, subCursorId: string) => {
   if (process.platform === 'win32') {
-    const info = embeddedWindows.get(paneId);
-    log(`[IPC focus-embedded-window] paneId=${paneId}, hwnd=${info?.hwnd}`);
+    const info = embeddedWindows.get(subCursorId);
+    log(`[IPC focus-embedded-window] subCursorId=${subCursorId}, hwnd=${info?.hwnd}`);
     if (info) {
       // 使用持久化 PowerShell 设置焦点（包含 AttachThreadInput）
       focusWindowWithPowerShell(info.hwnd, info.parentHwnd);
       return true;
     }
   } else if (process.platform === 'linux') {
-    log(`[IPC focus-embedded-window] Linux paneId=${paneId}`);
-    const result = await linuxEmbed.focusEmbeddedWindowLinux(paneId);
+    log(`[IPC focus-embedded-window] Linux subCursorId=${subCursorId}`);
+    const result = await linuxEmbed.focusEmbeddedWindowLinux(subCursorId);
     // 聚焦后提升所有窗口，确保都在主窗口之上
     linuxEmbed.raiseAllEmbeddedWindows();
     return result;
@@ -1233,30 +1289,30 @@ ipcMain.handle('open-log-folder', () => {
 });
 
 // 关闭Cursor实例
-ipcMain.handle('close-cursor', async (_event, paneId: string) => {
-  log(`[close-cursor] Closing cursor for pane: ${paneId}`);
+ipcMain.handle('close-cursor', async (_event, subCursorId: string) => {
+  log(`[close-cursor] Closing cursor for sub-cursor: ${subCursorId}`);
   
   if (process.platform === 'win32') {
     // Windows: 关闭嵌入的窗口
-    const embedInfo = embeddedWindows.get(paneId);
+    const embedInfo = embeddedWindows.get(subCursorId);
     if (embedInfo && psProcess && psReady) {
       log(`[close-cursor] Sending WM_CLOSE to hwnd: ${embedInfo.hwnd}`);
       psWrite(`[WinAPI]::PostMessage([IntPtr]${embedInfo.hwnd},$global:WM_CLOSE,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null\n`);
-      embeddedWindows.delete(paneId);
+      embeddedWindows.delete(subCursorId);
     }
   } else if (process.platform === 'linux') {
     // Linux: 使用 xdotool 关闭窗口
-    log(`[close-cursor] Closing Linux embedded window for pane: ${paneId}`);
-    await linuxEmbed.closeEmbeddedWindowLinux(paneId);
-    paneRelativePositions.delete(paneId);
+    log(`[close-cursor] Closing Linux embedded window for sub-cursor: ${subCursorId}`);
+    await linuxEmbed.closeEmbeddedWindowLinux(subCursorId);
+    subCursorRelativePositions.delete(subCursorId);
     scheduleInputShapeUpdate();
   }
   
   // 关闭进程
-  const proc = cursorProcesses.get(paneId);
+  const proc = cursorProcesses.get(subCursorId);
   if (proc) {
     proc.kill();
-    cursorProcesses.delete(paneId);
+    cursorProcesses.delete(subCursorId);
     return true;
   }
   return true;
@@ -1297,7 +1353,7 @@ interface SavedLayout {
   id: string;
   name: string;
   layout: WindowLayout;
-  panes: Record<string, PaneConfig>;
+  subCursors: Record<string, SubCursorConfig>;
   createdAt: number;
 }
 
@@ -1307,16 +1363,16 @@ ipcMain.handle('get-saved-layouts', () => {
 });
 
 // 保存当前布局
-ipcMain.handle('save-layout-as', (_event, name: string, layout: WindowLayout, panes: Record<string, PaneConfig>) => {
+ipcMain.handle('save-layout-as', (_event, name: string, layout: WindowLayout, subCursors: Record<string, SubCursorConfig>) => {
   const savedLayouts = store.get('savedLayouts', []) as SavedLayout[];
   
-  // 清理 panes 中的运行时状态
-  const cleanPanes: Record<string, PaneConfig> = {};
-  for (const [id, pane] of Object.entries(panes)) {
-    cleanPanes[id] = {
-      id: pane.id,
-      folderPath: pane.folderPath,
-      label: pane.label,
+  // 清理 subCursors 中的运行时状态
+  const cleanSubCursors: Record<string, SubCursorConfig> = {};
+  for (const [id, sc] of Object.entries(subCursors)) {
+    cleanSubCursors[id] = {
+      id: sc.id,
+      folderPath: sc.folderPath,
+      label: sc.label,
     };
   }
   
@@ -1324,7 +1380,7 @@ ipcMain.handle('save-layout-as', (_event, name: string, layout: WindowLayout, pa
     id: `layout-${Date.now()}`,
     name,
     layout,
-    panes: cleanPanes,
+    subCursors: cleanSubCursors,
     createdAt: Date.now(),
   };
   
@@ -1394,11 +1450,11 @@ ipcMain.handle('hide-all-embedded-windows', async () => {
   if (process.platform !== 'win32' || !psProcess || !psReady) return;
   
   log('[hide-all] Hiding all embedded windows');
-  for (const [paneId, info] of embeddedWindows) {
+  for (const [scId, info] of embeddedWindows) {
     // 使用 ShowWindow 隐藏窗口（SW_HIDE = 0）
     const cmd = `[WinAPI]::ShowWindow([IntPtr]${info.hwnd},0)|Out-Null\n`;
     psWrite(cmd);
-    log(`[hide-all] Hidden pane=${paneId}, hwnd=${info.hwnd}`);
+    log(`[hide-all] Hidden subCursor=${scId}, hwnd=${info.hwnd}`);
   }
 });
 
@@ -1406,21 +1462,21 @@ ipcMain.handle('show-all-embedded-windows', async () => {
   if (process.platform !== 'win32' || !psProcess || !psReady) return;
   
   log('[show-all] Showing all embedded windows');
-  for (const [paneId, info] of embeddedWindows) {
+  for (const [scId, info] of embeddedWindows) {
     // 使用 ShowWindow 显示窗口（SW_SHOWNOACTIVATE = 4，避免抢焦点）
     const cmd = `[WinAPI]::ShowWindow([IntPtr]${info.hwnd},4)|Out-Null\n`;
     psWrite(cmd);
-    log(`[show-all] Shown pane=${paneId}, hwnd=${info.hwnd}`);
+    log(`[show-all] Shown subCursor=${scId}, hwnd=${info.hwnd}`);
   }
 });
 
-// 只显示特定 pane 的嵌入窗口
-ipcMain.handle('show-embedded-window', async (_event, paneId: string) => {
+// 只显示特定 sub-cursor 的嵌入窗口
+ipcMain.handle('show-embedded-window', async (_event, subCursorId: string) => {
   if (process.platform !== 'win32' || !psProcess || !psReady) return;
   
-  const info = embeddedWindows.get(paneId);
+  const info = embeddedWindows.get(subCursorId);
   if (info) {
-    log(`[show-single] Showing embedded window for pane=${paneId}, hwnd=${info.hwnd}`);
+    log(`[show-single] Showing embedded window for subCursor=${subCursorId}, hwnd=${info.hwnd}`);
     const cmd = `[WinAPI]::ShowWindow([IntPtr]${info.hwnd},4)|Out-Null\n`;
     psWrite(cmd);
   }

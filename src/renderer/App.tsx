@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { WindowLayout, PaneConfig } from './types';
+import { WindowLayout, SubCursorConfig } from './types';
 import SplitLayout from './components/SplitLayout';
 import Toolbar from './components/Toolbar';
 import SettingsModal from './components/SettingsModal';
@@ -14,14 +14,14 @@ const DEFAULT_LAYOUT: WindowLayout = {
   direction: 'row',
   first: {
     direction: 'column',
-    first: 'pane-1',
-    second: 'pane-3',
+    first: 'sub-cursor-1',
+    second: 'sub-cursor-3',
     splitPercentage: 50,
   },
   second: {
     direction: 'column',
-    first: 'pane-2',
-    second: 'pane-4',
+    first: 'sub-cursor-2',
+    second: 'sub-cursor-4',
     splitPercentage: 50,
   },
   splitPercentage: 50,
@@ -29,65 +29,65 @@ const DEFAULT_LAYOUT: WindowLayout = {
 
 function App() {
   const [layout, setLayout] = useState<WindowLayout>(DEFAULT_LAYOUT);
-  const [panes, setPanes] = useState<Record<string, PaneConfig>>({});
+  const [subCursors, setSubCursors] = useState<Record<string, SubCursorConfig>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
-  // 当前最大化的 pane ID，null 表示没有最大化
-  const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
+  // 当前最大化的 sub-cursor ID，null 表示没有最大化
+  const [maximizedSubCursorId, setMaximizedSubCursorId] = useState<string | null>(null);
   
-  // 使用 ref 保存最新的 panes 状态，用于关闭前保存
-  const panesRef = useRef(panes);
+  // 使用 ref 保存最新的 subCursors 状态，用于关闭前保存
+  const subCursorsRef = useRef(subCursors);
   useEffect(() => {
-    panesRef.current = panes;
-  }, [panes]);
+    subCursorsRef.current = subCursors;
+  }, [subCursors]);
 
   // 加载保存的配置
   useEffect(() => {
     const loadConfig = async () => {
       try {
         const savedLayout = await window.electronAPI.getLayout();
-        const savedPanes = await window.electronAPI.getPanes();
+        const savedSubCursors = await window.electronAPI.getSubCursors();
         
         if (savedLayout) {
           setLayout(savedLayout);
         }
-        if (savedPanes) {
-          console.log('[Load] Saved panes loaded:', JSON.stringify(savedPanes));
-          // 收集需要自动恢复的 pane（有 folderPath 的都需要恢复）
-          const panesToRestore: string[] = [];
+        if (savedSubCursors) {
+          console.log('[Load] Saved sub-cursors loaded:', JSON.stringify(savedSubCursors));
+          // 收集需要自动恢复的 sub-cursor（有 folderPath 的都需要恢复）
+          const subCursorsToRestore: string[] = [];
           
-          // 重置所有 pane 的运行状态（因为程序重启了，Cursor 并没有在运行）
-          const cleanPanes: Record<string, PaneConfig> = {};
-          Object.entries(savedPanes).forEach(([paneId, pane]) => {
-            cleanPanes[paneId] = {
-              ...pane,
+          // 重置所有 sub-cursor 的运行状态（因为程序重启了，Cursor 并没有在运行）
+          const cleanSubCursors: Record<string, SubCursorConfig> = {};
+          Object.entries(savedSubCursors).forEach(([subCursorId, sc]) => {
+            cleanSubCursors[subCursorId] = {
+              ...sc,
               isRunning: false,
               cursorPid: undefined,
             };
-            // 记录需要恢复的 pane（只要有 folderPath 就恢复）
-            if (pane.folderPath) {
-              panesToRestore.push(paneId);
-              console.log(`[Load] Pane ${paneId} will be restored with folderPath: ${pane.folderPath}`);
+            // 记录需要恢复的 sub-cursor（只要有 folderPath 就恢复）
+            if (sc.folderPath) {
+              subCursorsToRestore.push(subCursorId);
+              console.log(`[Load] Sub-cursor ${subCursorId} will be restored with folderPath: ${sc.folderPath}`);
             }
           });
           
-          setPanes(cleanPanes);
+          setSubCursors(cleanSubCursors);
           
           // 自动恢复之前打开的 Cursor 窗口（延迟执行以等待 DOM 渲染完成）
-          if (panesToRestore.length > 0) {
-            console.log(`[AutoRestore] Will restore ${panesToRestore.length} Cursor windows:`, panesToRestore);
+          if (subCursorsToRestore.length > 0) {
+            console.log(`[AutoRestore] Will restore ${subCursorsToRestore.length} Cursor windows:`, subCursorsToRestore);
             // 使用递归延迟打开，避免同时打开太多窗口
             const restoreNext = async (index: number) => {
-              if (index >= panesToRestore.length) return;
+              if (index >= subCursorsToRestore.length) return;
               
-              const paneId = panesToRestore[index];
-              const pane = savedPanes[paneId];
-              const paneEl = document.querySelector(`[data-pane-id="${paneId}"] .pane-content`);
+              const subCursorId = subCursorsToRestore[index];
+              const sc = savedSubCursors[subCursorId];
+              const scEl = document.querySelector(`[data-sub-cursor-id="${subCursorId}"] .sub-cursor-content`);
               
-              if (paneEl && pane.folderPath) {
-                const rect = paneEl.getBoundingClientRect();
-                log(`[AutoRestore] Restoring Cursor for ${paneId}:`, pane.folderPath, rect);
-                const result = await window.electronAPI.openCursor(paneId, pane.folderPath, {
+              if (scEl && sc.folderPath) {
+                const rect = scEl.getBoundingClientRect();
+                log(`[AutoRestore] Restoring Cursor for ${subCursorId}:`, sc.folderPath, rect);
+                const result = await window.electronAPI.openCursor(subCursorId, sc.folderPath, {
                   x: Math.round(rect.left),
                   y: Math.round(rect.top),
                   width: Math.round(rect.width),
@@ -95,13 +95,13 @@ function App() {
                 });
                 // 如果成功，更新状态
                 if (result.success) {
-                  setPanes(prev => ({
+                  setSubCursors(prev => ({
                     ...prev,
-                    [paneId]: { ...prev[paneId], isRunning: true, cursorPid: result.pid },
+                    [subCursorId]: { ...prev[subCursorId], isRunning: true, cursorPid: result.pid },
                   }));
                 }
               } else {
-                log(`[AutoRestore] Cannot restore ${paneId}: paneEl=${!!paneEl}, folderPath=${pane.folderPath}`);
+                log(`[AutoRestore] Cannot restore ${subCursorId}: scEl=${!!scEl}, folderPath=${sc.folderPath}`);
               }
               
               // 2秒后打开下一个
@@ -122,27 +122,27 @@ function App() {
     loadConfig();
 
     // 监听Cursor关闭事件
-    window.electronAPI.onCursorClosed((paneId) => {
-      setPanes((prev) => ({
+    window.electronAPI.onCursorClosed((subCursorId) => {
+      setSubCursors((prev) => ({
         ...prev,
-        [paneId]: { ...prev[paneId], isRunning: false, cursorPid: undefined },
+        [subCursorId]: { ...prev[subCursorId], isRunning: false, cursorPid: undefined },
       }));
     });
 
-    window.electronAPI.onCursorError((paneId, error) => {
-      console.error(`Cursor error for pane ${paneId}:`, error);
-      setPanes((prev) => ({
+    window.electronAPI.onCursorError((subCursorId, error) => {
+      console.error(`Cursor error for sub-cursor ${subCursorId}:`, error);
+      setSubCursors((prev) => ({
         ...prev,
-        [paneId]: { ...prev[paneId], isRunning: false, cursorPid: undefined },
+        [subCursorId]: { ...prev[subCursorId], isRunning: false, cursorPid: undefined },
       }));
     });
 
-    // 监听关闭前保存状态事件（保存当前的 panes 配置，包括 folderPath）
+    // 监听关闭前保存状态事件（保存当前的 subCursors 配置，包括 folderPath）
     window.electronAPI.onSaveStateBeforeClose(async () => {
-      console.log('[SaveState] Saving state before close, panes:', JSON.stringify(panesRef.current));
-      // 使用 ref 获取最新的 panes 状态
-      await window.electronAPI.savePanes(panesRef.current);
-      console.log('[SaveState] Panes saved successfully');
+      console.log('[SaveState] Saving state before close, subCursors:', JSON.stringify(subCursorsRef.current));
+      // 使用 ref 获取最新的 subCursors 状态
+      await window.electronAPI.saveSubCursors(subCursorsRef.current);
+      console.log('[SaveState] Sub-cursors saved successfully');
       // 通知主进程保存已完成
       await window.electronAPI.stateSaved();
     });
@@ -157,15 +157,15 @@ function App() {
       if (now - lastUpdateTime < THROTTLE_MS) return;
       lastUpdateTime = now;
       
-      // 更新所有运行中的 pane 窗口位置
-      const currentPanes = panesRef.current;
-      const runningPanes = Object.keys(currentPanes).filter(id => currentPanes[id]?.isRunning);
+      // 更新所有运行中的 sub-cursor 窗口位置
+      const currentSubCursors = subCursorsRef.current;
+      const runningSubCursors = Object.keys(currentSubCursors).filter(id => currentSubCursors[id]?.isRunning);
       
-      runningPanes.forEach(paneId => {
-        const paneEl = document.querySelector(`[data-pane-id="${paneId}"] .pane-content`);
-        if (paneEl) {
-          const rect = paneEl.getBoundingClientRect();
-          window.electronAPI.resizeEmbeddedWindow(paneId, {
+      runningSubCursors.forEach(subCursorId => {
+        const scEl = document.querySelector(`[data-sub-cursor-id="${subCursorId}"] .sub-cursor-content`);
+        if (scEl) {
+          const rect = scEl.getBoundingClientRect();
+          window.electronAPI.resizeEmbeddedWindow(subCursorId, {
             x: Math.round(rect.left),
             y: Math.round(rect.top),
             width: Math.round(rect.width),
@@ -189,117 +189,117 @@ function App() {
     await window.electronAPI.saveLayout(newLayout);
   }, []);
 
-  // 窗格配置变化时保存
-  const handlePanesChange = useCallback(async (newPanes: Record<string, PaneConfig>) => {
-    setPanes(newPanes);
-    await window.electronAPI.savePanes(newPanes);
+  // Sub Cursor 配置变化时保存
+  const handleSubCursorsChange = useCallback(async (newSubCursors: Record<string, SubCursorConfig>) => {
+    setSubCursors(newSubCursors);
+    await window.electronAPI.saveSubCursors(newSubCursors);
   }, []);
 
-  // 更新单个窗格
-  const updatePane = useCallback((paneId: string, config: Partial<PaneConfig>) => {
-    handlePanesChange({
-      ...panes,
-      [paneId]: { ...panes[paneId], id: paneId, ...config },
+  // 更新单个 Sub Cursor
+  const updateSubCursor = useCallback((subCursorId: string, config: Partial<SubCursorConfig>) => {
+    handleSubCursorsChange({
+      ...subCursors,
+      [subCursorId]: { ...subCursors[subCursorId], id: subCursorId, ...config },
     });
-  }, [panes, handlePanesChange]);
+  }, [subCursors, handleSubCursorsChange]);
 
   // 打开Cursor
-  const openCursor = useCallback(async (paneId: string, bounds: { x: number; y: number; width: number; height: number }) => {
-    const pane = panes[paneId];
-    log('Opening Cursor for pane:', paneId, 'with bounds:', bounds);
-    const result = await window.electronAPI.openCursor(paneId, pane?.folderPath, bounds);
+  const openCursor = useCallback(async (subCursorId: string, bounds: { x: number; y: number; width: number; height: number }) => {
+    const sc = subCursors[subCursorId];
+    log('Opening Cursor for sub-cursor:', subCursorId, 'with bounds:', bounds);
+    const result = await window.electronAPI.openCursor(subCursorId, sc?.folderPath, bounds);
     
     if (result.success) {
-      updatePane(paneId, { isRunning: true, cursorPid: result.pid });
+      updateSubCursor(subCursorId, { isRunning: true, cursorPid: result.pid });
     } else {
       console.error('Failed to open Cursor:', result.error);
     }
-  }, [panes, updatePane]);
+  }, [subCursors, updateSubCursor]);
 
   // 关闭Cursor
-  const closeCursor = useCallback(async (paneId: string) => {
-    await window.electronAPI.closeCursor(paneId);
-    updatePane(paneId, { isRunning: false, cursorPid: undefined });
-  }, [updatePane]);
+  const closeCursor = useCallback(async (subCursorId: string) => {
+    await window.electronAPI.closeCursor(subCursorId);
+    updateSubCursor(subCursorId, { isRunning: false, cursorPid: undefined });
+  }, [updateSubCursor]);
 
   // 选择文件夹
-  const selectFolder = useCallback(async (paneId: string) => {
+  const selectFolder = useCallback(async (subCursorId: string) => {
     const folderPath = await window.electronAPI.selectFolder();
     if (folderPath) {
-      // 检查是否有其他 pane 已使用该文件夹
-      const existingPane = Object.entries(panes).find(
-        ([id, config]) => id !== paneId && config.folderPath === folderPath
+      // 检查是否有其他 sub-cursor 已使用该文件夹
+      const existingSubCursor = Object.entries(subCursors).find(
+        ([id, config]) => id !== subCursorId && config.folderPath === folderPath
       );
       
-      if (existingPane) {
-        const [existingPaneId, existingConfig] = existingPane;
-        const existingPaneName = existingConfig.label || existingPaneId;
+      if (existingSubCursor) {
+        const [existingId, existingConfig] = existingSubCursor;
+        const existingName = existingConfig.label || existingId;
         const shouldCopy = window.confirm(
-          `窗格 "${existingPaneName}" 已打开此文件夹。\n\n是否复制其窗口配置？`
+          `Sub Cursor "${existingName}" 已打开此文件夹。\n\n是否复制其窗口配置？`
         );
         
         if (shouldCopy) {
           // 复制配置（包括文件夹路径）
-          updatePane(paneId, { 
+          updateSubCursor(subCursorId, { 
             folderPath,
             label: existingConfig.label ? `${existingConfig.label} (副本)` : undefined,
           });
         } else {
           // 仅设置文件夹路径
-          updatePane(paneId, { folderPath });
+          updateSubCursor(subCursorId, { folderPath });
         }
       } else {
-        updatePane(paneId, { folderPath });
+        updateSubCursor(subCursorId, { folderPath });
       }
     }
-  }, [panes, updatePane]);
+  }, [subCursors, updateSubCursor]);
 
   // 清除文件夹选择
-  const clearFolder = useCallback((paneId: string) => {
-    updatePane(paneId, { folderPath: undefined });
-  }, [updatePane]);
+  const clearFolder = useCallback((subCursorId: string) => {
+    updateSubCursor(subCursorId, { folderPath: undefined });
+  }, [updateSubCursor]);
 
-  // 添加新窗格
-  const addPane = useCallback(() => {
-    const paneIds = getAllPaneIds(layout);
-    const maxId = paneIds.reduce((max, id) => {
-      const num = parseInt(id.replace('pane-', ''), 10);
+  // 添加新 Sub Cursor
+  const addSubCursor = useCallback(() => {
+    const subCursorIds = getAllSubCursorIds(layout);
+    const maxId = subCursorIds.reduce((max, id) => {
+      const num = parseInt(id.replace('sub-cursor-', ''), 10);
       return isNaN(num) ? max : Math.max(max, num);
     }, 0);
-    const newPaneId = `pane-${maxId + 1}`;
+    const newSubCursorId = `sub-cursor-${maxId + 1}`;
 
-    // 在最后一个位置添加新窗格
+    // 在最后一个位置添加新 Sub Cursor
     const newLayout: WindowLayout = {
       direction: 'column',
       first: layout,
-      second: newPaneId,
+      second: newSubCursorId,
       splitPercentage: 75,
     };
 
     handleLayoutChange(newLayout);
   }, [layout, handleLayoutChange]);
 
-  // 删除窗格
-  const removePane = useCallback((paneId: string) => {
-    const newLayout = removePaneFromLayout(layout, paneId);
+  // 删除 Sub Cursor
+  const removeSubCursor = useCallback((subCursorId: string) => {
+    const newLayout = removeSubCursorFromLayout(layout, subCursorId);
     if (newLayout) {
       handleLayoutChange(newLayout);
-      // 同时删除窗格配置
-      const newPanes = { ...panes };
-      delete newPanes[paneId];
-      handlePanesChange(newPanes);
+      // 同时删除配置
+      const newSubCursors = { ...subCursors };
+      delete newSubCursors[subCursorId];
+      handleSubCursorsChange(newSubCursors);
     }
-  }, [layout, panes, handleLayoutChange, handlePanesChange]);
+  }, [layout, subCursors, handleLayoutChange, handleSubCursorsChange]);
 
-  // 拆分窗格
-  const splitPane = useCallback((paneId: string, direction: 'up' | 'down' | 'left' | 'right') => {
-    // 计算新窗格ID
-    const paneIds = getAllPaneIds(layout);
-    const maxId = paneIds.reduce((max, id) => {
-      const num = parseInt(id.replace('pane-', ''), 10);
+  // 拆分 Sub Cursor
+  const splitSubCursor = useCallback((subCursorId: string, direction: 'up' | 'down' | 'left' | 'right') => {
+    // 计算新 Sub Cursor ID
+    const subCursorIds = getAllSubCursorIds(layout);
+    const maxId = subCursorIds.reduce((max, id) => {
+      const num = parseInt(id.replace('sub-cursor-', ''), 10);
       return isNaN(num) ? max : Math.max(max, num);
     }, 0);
-    const newPaneId = `pane-${maxId + 1}`;
+    const newSubCursorId = `sub-cursor-${maxId + 1}`;
 
     // 根据方向创建新的分割布局
     const splitDirection = (direction === 'left' || direction === 'right') ? 'row' : 'column';
@@ -307,15 +307,15 @@ function App() {
     
     const newSplit: WindowLayout = {
       direction: splitDirection,
-      first: isFirstPosition ? newPaneId : paneId,
-      second: isFirstPosition ? paneId : newPaneId,
+      first: isFirstPosition ? newSubCursorId : subCursorId,
+      second: isFirstPosition ? subCursorId : newSubCursorId,
       splitPercentage: 50,
     };
 
-    // 替换布局中的 paneId
+    // 替换布局中的 subCursorId
     const replaceInLayout = (l: WindowLayout): WindowLayout => {
       if (typeof l === 'string') {
-        return l === paneId ? newSplit : l;
+        return l === subCursorId ? newSplit : l;
       }
       return {
         ...l,
@@ -331,14 +331,14 @@ function App() {
   // 重置布局
   const resetLayout = useCallback(() => {
     // 先关闭所有运行中的 Cursor
-    Object.keys(panes).forEach(paneId => {
-      if (panes[paneId]?.isRunning) {
-        window.electronAPI.closeCursor(paneId);
+    Object.keys(subCursors).forEach(subCursorId => {
+      if (subCursors[subCursorId]?.isRunning) {
+        window.electronAPI.closeCursor(subCursorId);
       }
     });
     handleLayoutChange(DEFAULT_LAYOUT);
-    handlePanesChange({});
-  }, [panes, handleLayoutChange, handlePanesChange]);
+    handleSubCursorsChange({});
+  }, [subCursors, handleLayoutChange, handleSubCursorsChange]);
 
   // 预设布局
   const applyPresetLayout = useCallback((preset: 'single' | 'dual-h' | 'dual-v' | 'quad' | 'triple' | 'six' | 'eight') => {
@@ -346,21 +346,21 @@ function App() {
     
     switch (preset) {
       case 'single':
-        newLayout = 'pane-1';
+        newLayout = 'sub-cursor-1';
         break;
       case 'dual-h':
         newLayout = {
           direction: 'row',
-          first: 'pane-1',
-          second: 'pane-2',
+          first: 'sub-cursor-1',
+          second: 'sub-cursor-2',
           splitPercentage: 50,
         };
         break;
       case 'dual-v':
         newLayout = {
           direction: 'column',
-          first: 'pane-1',
-          second: 'pane-2',
+          first: 'sub-cursor-1',
+          second: 'sub-cursor-2',
           splitPercentage: 50,
         };
         break;
@@ -369,14 +369,14 @@ function App() {
           direction: 'row',
           first: {
             direction: 'column',
-            first: 'pane-1',
-            second: 'pane-3',
+            first: 'sub-cursor-1',
+            second: 'sub-cursor-3',
             splitPercentage: 50,
           },
           second: {
             direction: 'column',
-            first: 'pane-2',
-            second: 'pane-4',
+            first: 'sub-cursor-2',
+            second: 'sub-cursor-4',
             splitPercentage: 50,
           },
           splitPercentage: 50,
@@ -385,11 +385,11 @@ function App() {
       case 'triple':
         newLayout = {
           direction: 'row',
-          first: 'pane-1',
+          first: 'sub-cursor-1',
           second: {
             direction: 'column',
-            first: 'pane-2',
-            second: 'pane-3',
+            first: 'sub-cursor-2',
+            second: 'sub-cursor-3',
             splitPercentage: 50,
           },
           splitPercentage: 50,
@@ -401,22 +401,22 @@ function App() {
           direction: 'column',
           first: {
             direction: 'row',
-            first: 'pane-1',
+            first: 'sub-cursor-1',
             second: {
               direction: 'row',
-              first: 'pane-2',
-              second: 'pane-3',
+              first: 'sub-cursor-2',
+              second: 'sub-cursor-3',
               splitPercentage: 50,
             },
             splitPercentage: 33,
           },
           second: {
             direction: 'row',
-            first: 'pane-4',
+            first: 'sub-cursor-4',
             second: {
               direction: 'row',
-              first: 'pane-5',
-              second: 'pane-6',
+              first: 'sub-cursor-5',
+              second: 'sub-cursor-6',
               splitPercentage: 50,
             },
             splitPercentage: 33,
@@ -432,14 +432,14 @@ function App() {
             direction: 'row',
             first: {
               direction: 'row',
-              first: 'pane-1',
-              second: 'pane-2',
+              first: 'sub-cursor-1',
+              second: 'sub-cursor-2',
               splitPercentage: 50,
             },
             second: {
               direction: 'row',
-              first: 'pane-3',
-              second: 'pane-4',
+              first: 'sub-cursor-3',
+              second: 'sub-cursor-4',
               splitPercentage: 50,
             },
             splitPercentage: 50,
@@ -448,14 +448,14 @@ function App() {
             direction: 'row',
             first: {
               direction: 'row',
-              first: 'pane-5',
-              second: 'pane-6',
+              first: 'sub-cursor-5',
+              second: 'sub-cursor-6',
               splitPercentage: 50,
             },
             second: {
               direction: 'row',
-              first: 'pane-7',
-              second: 'pane-8',
+              first: 'sub-cursor-7',
+              second: 'sub-cursor-8',
               splitPercentage: 50,
             },
             splitPercentage: 50,
@@ -468,59 +468,59 @@ function App() {
     }
     
     // 检查当前运行中的 Cursor 数量
-    const currentPaneIds = getAllPaneIds(layout);
-    const newPaneIds = getAllPaneIds(newLayout);
-    const runningPanes = currentPaneIds.filter(id => panes[id]?.isRunning);
-    const panesWillBeLost = runningPanes.filter(id => !newPaneIds.includes(id));
+    const currentSubCursorIds = getAllSubCursorIds(layout);
+    const newSubCursorIds = getAllSubCursorIds(newLayout);
+    const runningSubCursors = currentSubCursorIds.filter(id => subCursors[id]?.isRunning);
+    const subCursorsWillBeLost = runningSubCursors.filter(id => !newSubCursorIds.includes(id));
     
     // 如果有运行中的 Cursor 会被丢弃，提示用户
-    if (panesWillBeLost.length > 0) {
-      const names = panesWillBeLost.map(id => panes[id]?.label || id).join(', ');
+    if (subCursorsWillBeLost.length > 0) {
+      const names = subCursorsWillBeLost.map(id => subCursors[id]?.label || id).join(', ');
       const confirmed = window.confirm(
-        `切换布局将关闭 ${panesWillBeLost.length} 个运行中的 Cursor 窗口：\n${names}\n\n确定要继续吗？`
+        `切换布局将关闭 ${subCursorsWillBeLost.length} 个运行中的 Cursor 窗口：\n${names}\n\n确定要继续吗？`
       );
       if (!confirmed) {
         return;
       }
       // 关闭将被丢弃的 Cursor
-      panesWillBeLost.forEach(paneId => {
-        window.electronAPI.closeCursor(paneId);
+      subCursorsWillBeLost.forEach(subCursorId => {
+        window.electronAPI.closeCursor(subCursorId);
       });
     }
     
     handleLayoutChange(newLayout);
-  }, [handleLayoutChange, layout, panes]);
+  }, [handleLayoutChange, layout, subCursors]);
 
   // 加载收藏的布局（必须在条件返回之前定义 hooks）
-  const loadSavedLayout = useCallback((savedLayout: WindowLayout, savedPanes: Record<string, PaneConfig>) => {
+  const loadSavedLayout = useCallback((savedLayout: WindowLayout, savedSubCursors: Record<string, SubCursorConfig>) => {
     // 先关闭所有运行中的 Cursor
-    Object.keys(panes).forEach(paneId => {
-      if (panes[paneId]?.isRunning) {
-        window.electronAPI.closeCursor(paneId);
+    Object.keys(subCursors).forEach(subCursorId => {
+      if (subCursors[subCursorId]?.isRunning) {
+        window.electronAPI.closeCursor(subCursorId);
       }
     });
     
     // 加载新布局
     setLayout(savedLayout);
-    setPanes(savedPanes);
+    setSubCursors(savedSubCursors);
     window.electronAPI.saveLayout(savedLayout);
-    window.electronAPI.savePanes(savedPanes);
-  }, [panes]);
+    window.electronAPI.saveSubCursors(savedSubCursors);
+  }, [subCursors]);
 
-  // 切换 pane 最大化状态
-  const toggleMaximizePane = useCallback(async (paneId: string) => {
-    if (maximizedPaneId === paneId) {
+  // 切换 sub-cursor 最大化状态
+  const toggleMaximizeSubCursor = useCallback(async (subCursorId: string) => {
+    if (maximizedSubCursorId === subCursorId) {
       // 已经最大化，则还原
-      setMaximizedPaneId(null);
+      setMaximizedSubCursorId(null);
       // 延迟显示所有嵌入窗口并更新位置（等待布局更新）
       setTimeout(async () => {
         await window.electronAPI.showAllEmbeddedWindows();
-        // 更新所有运行中的 pane 窗口位置
-        Object.keys(panes).forEach(id => {
-          if (panes[id]?.isRunning) {
-            const paneEl = document.querySelector(`[data-pane-id="${id}"] .pane-content`);
-            if (paneEl) {
-              const rect = paneEl.getBoundingClientRect();
+        // 更新所有运行中的 sub-cursor 窗口位置
+        Object.keys(subCursors).forEach(id => {
+          if (subCursors[id]?.isRunning) {
+            const scEl = document.querySelector(`[data-sub-cursor-id="${id}"] .sub-cursor-content`);
+            if (scEl) {
+              const rect = scEl.getBoundingClientRect();
               window.electronAPI.resizeEmbeddedWindow(id, {
                 x: Math.round(rect.left),
                 y: Math.round(rect.top),
@@ -532,30 +532,30 @@ function App() {
         });
       }, 50);
     } else {
-      // 最大化此 pane
+      // 最大化此 sub-cursor
       // 先隐藏所有嵌入窗口
       await window.electronAPI.hideAllEmbeddedWindows();
-      setMaximizedPaneId(paneId);
-      // 然后延迟更新最大化 pane 的窗口位置并显示
+      setMaximizedSubCursorId(subCursorId);
+      // 然后延迟更新最大化 sub-cursor 的窗口位置并显示
       setTimeout(async () => {
-        if (panes[paneId]?.isRunning) {
-          // 重新调整当前 pane 窗口的位置
-          const paneEl = document.querySelector(`[data-pane-id="${paneId}"] .pane-content`);
-          if (paneEl) {
-            const rect = paneEl.getBoundingClientRect();
-            await window.electronAPI.resizeEmbeddedWindow(paneId, {
+        if (subCursors[subCursorId]?.isRunning) {
+          // 重新调整当前 sub-cursor 窗口的位置
+          const scEl = document.querySelector(`[data-sub-cursor-id="${subCursorId}"] .sub-cursor-content`);
+          if (scEl) {
+            const rect = scEl.getBoundingClientRect();
+            await window.electronAPI.resizeEmbeddedWindow(subCursorId, {
               x: Math.round(rect.left),
               y: Math.round(rect.top),
               width: Math.round(rect.width),
               height: Math.round(rect.height),
             });
-            // 只显示当前 pane 的嵌入窗口
-            await window.electronAPI.showEmbeddedWindow(paneId);
+            // 只显示当前 sub-cursor 的嵌入窗口
+            await window.electronAPI.showEmbeddedWindow(subCursorId);
           }
         }
       }, 100);
     }
-  }, [maximizedPaneId, panes]);
+  }, [maximizedSubCursorId, subCursors]);
 
   if (isLoading) {
     return (
@@ -569,29 +569,29 @@ function App() {
   return (
     <div className="app">
       <Toolbar
-        onAddPane={addPane}
+        onAddSubCursor={addSubCursor}
         onResetLayout={resetLayout}
         onApplyPreset={applyPresetLayout}
         onOpenSettings={() => setShowSettings(true)}
         currentLayout={layout}
-        currentPanes={panes}
+        currentSubCursors={subCursors}
         onLoadLayout={loadSavedLayout}
       />
       
       <div className="layout-container">
         <SplitLayout
           layout={layout}
-          panes={panes}
+          subCursors={subCursors}
           onLayoutChange={handleLayoutChange}
           onOpenCursor={openCursor}
           onCloseCursor={closeCursor}
           onSelectFolder={selectFolder}
           onClearFolder={clearFolder}
-          onRemovePane={removePane}
-          onUpdatePane={updatePane}
-          onSplitPane={splitPane}
-          maximizedPaneId={maximizedPaneId}
-          onToggleMaximize={toggleMaximizePane}
+          onRemoveSubCursor={removeSubCursor}
+          onUpdateSubCursor={updateSubCursor}
+          onSplitSubCursor={splitSubCursor}
+          maximizedSubCursorId={maximizedSubCursorId}
+          onToggleMaximize={toggleMaximizeSubCursor}
         />
       </div>
 
@@ -602,29 +602,29 @@ function App() {
   );
 }
 
-// 辅助函数：获取所有窗格ID
-function getAllPaneIds(layout: WindowLayout): string[] {
+// 辅助函数：获取所有 Sub Cursor ID
+function getAllSubCursorIds(layout: WindowLayout): string[] {
   if (typeof layout === 'string') {
     return [layout];
   }
-  return [...getAllPaneIds(layout.first), ...getAllPaneIds(layout.second)];
+  return [...getAllSubCursorIds(layout.first), ...getAllSubCursorIds(layout.second)];
 }
 
-// 辅助函数：从布局中删除窗格
-function removePaneFromLayout(layout: WindowLayout, paneId: string): WindowLayout | null {
+// 辅助函数：从布局中删除 Sub Cursor
+function removeSubCursorFromLayout(layout: WindowLayout, subCursorId: string): WindowLayout | null {
   if (typeof layout === 'string') {
-    return layout === paneId ? null : layout;
+    return layout === subCursorId ? null : layout;
   }
 
-  if (layout.first === paneId) {
+  if (layout.first === subCursorId) {
     return layout.second;
   }
-  if (layout.second === paneId) {
+  if (layout.second === subCursorId) {
     return layout.first;
   }
 
-  const newFirst = removePaneFromLayout(layout.first, paneId);
-  const newSecond = removePaneFromLayout(layout.second, paneId);
+  const newFirst = removeSubCursorFromLayout(layout.first, subCursorId);
+  const newSecond = removeSubCursorFromLayout(layout.second, subCursorId);
 
   if (newFirst === null) return newSecond;
   if (newSecond === null) return newFirst;

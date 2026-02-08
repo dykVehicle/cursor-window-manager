@@ -30,13 +30,14 @@ let x11: {
   XReparentWindow: any;
   XMoveResizeWindow: any;
   XMapWindow: any;
+  XChangeProperty: any;
 } | null = null;
 let x11Display: any = null;
 let x11RootWindow: bigint | null = null;
 let x11Atoms: Map<string, bigint> = new Map();
 let x11InitTried = false;
 
-// XShape 扩展（用于设置主窗口输入区域，实现 pane 区域鼠标穿透）
+// XShape 扩展（用于设置主窗口输入区域，实现 sub-cursor 区域鼠标穿透）
 let xShapeAvailable = false;
 let XShapeCombineRectangles: any = null;
 
@@ -76,6 +77,7 @@ function initX11(): boolean {
       XReparentWindow: lib.func('XReparentWindow', 'int', ['void*', 'ulong', 'ulong', 'int', 'int']),
       XMoveResizeWindow: lib.func('XMoveResizeWindow', 'int', ['void*', 'ulong', 'int', 'int', 'uint', 'uint']),
       XMapWindow: lib.func('XMapWindow', 'int', ['void*', 'ulong']),
+      XChangeProperty: lib.func('XChangeProperty', 'int', ['void*', 'ulong', 'ulong', 'ulong', 'int', 'int', 'void*', 'int']),
     };
 
     const displayName = process.env.DISPLAY || '';
@@ -356,8 +358,8 @@ export function moveResizeWindowX11(windowId: string, x: number, y: number, widt
 /**
  * 检查窗口是否已被 reparent
  */
-export function isWindowReparented(paneId: string): boolean {
-  const info = embeddedWindows.get(paneId);
+export function isWindowReparented(subCursorId: string): boolean {
+  const info = embeddedWindows.get(subCursorId);
   return info?.reparented === true;
 }
 
@@ -377,11 +379,11 @@ function buildXRectangleBuffer(rects: Array<{x: number, y: number, width: number
 
 /**
  * 更新主窗口的输入区域（XShape ShapeInput）
- * 让已嵌入 Cursor 的 pane 内容区域鼠标穿透，点击直接到达子 Cursor 窗口
+ * 让已嵌入 Cursor 的 sub-cursor 内容区域鼠标穿透，点击直接到达子 Cursor 窗口
  * 
  * @param windowWidth  主窗口宽度
  * @param windowHeight 主窗口高度
- * @param excludeRegions 需要穿透的区域（pane 内容区域坐标，相对于主窗口）
+ * @param excludeRegions 需要穿透的区域（sub-cursor 内容区域坐标，相对于主窗口）
  */
 export function updateMainWindowInputShape(
   windowWidth: number,
@@ -403,7 +405,7 @@ export function updateMainWindowInputShape(
     const fullRect = buildXRectangleBuffer([{ x: 0, y: 0, width: windowWidth, height: windowHeight }]);
     XShapeCombineRectangles(x11Display, win, ShapeInput, 0, 0, fullRect, 1, ShapeSet, Unsorted);
     
-    // 2. 减去每个已嵌入 Cursor 的 pane 内容区域（使这些区域鼠标穿透）
+    // 2. 减去每个已嵌入 Cursor 的 sub-cursor 内容区域（使这些区域鼠标穿透）
     for (const region of excludeRegions) {
       if (region.width <= 0 || region.height <= 0) continue;
       const rect = buildXRectangleBuffer([region]);
@@ -750,10 +752,10 @@ export async function setWindowAbove(windowId: string, above: boolean = true): P
  * 移除所有嵌入窗口的全局置顶状态（修复遮挡其他程序的问题）
  */
 export function removeGlobalAboveState(): void {
-  for (const [paneId, info] of embeddedWindows) {
+  for (const [scId, info] of embeddedWindows) {
     requestNetWmState(info.windowId, '_NET_WM_STATE_ABOVE', 0);
     requestNetWmState(info.windowId, '_NET_WM_STATE_STAYS_ON_TOP', 0);
-    log(`[removeGlobalAbove] Removed ABOVE/TOP for pane=${paneId}, windowId=${info.windowId}`);
+    log(`[removeGlobalAbove] Removed ABOVE/TOP for subCursor=${scId}, windowId=${info.windowId}`);
   }
 }
 
@@ -838,12 +840,12 @@ export async function closeWindow(windowId: string): Promise<boolean> {
  * 嵌入窗口到指定位置（伪嵌入：移除边框 + 定位）
  */
 export async function embedWindowLinux(
-  paneId: string,
+  subCursorId: string,
   pid: number,
   mainWindow: BrowserWindow,
-  paneBounds: { x: number; y: number; width: number; height: number }
+  subCursorBounds: { x: number; y: number; width: number; height: number }
 ): Promise<{ success: boolean; windowId?: string; error?: string }> {
-  log(`Embedding window for pane: ${paneId}, pid: ${pid}`);
+  log(`Embedding window for sub-cursor: ${subCursorId}, pid: ${pid}`);
   
   // 检查 xdotool
   if (!await checkXdotool()) {
@@ -856,7 +858,7 @@ export async function embedWindowLinux(
     return { success: false, error: 'New Cursor window not found' };
   }
   
-  // 将此窗口标记为已知（避免被其他 pane 使用）
+  // 将此窗口标记为已知（避免被其他 sub-cursor 使用）
   knownCursorWindowIds.add(windowId);
   
   // 取消最大化（xprop 方式）
@@ -878,32 +880,32 @@ export async function embedWindowLinux(
   // 
   // 改用浮动窗口模式：Cursor 窗口保持为独立的顶层窗口，
   // 通过 WM_TRANSIENT_FOR 保持在主窗口之上，
-  // 通过 XShape（ShapeInput）在主窗口对应 pane 区域打"输入穿透洞"，
+  // 通过 XShape（ShapeInput）在主窗口对应 sub-cursor 区域打"输入穿透洞"，
   // 让鼠标事件直接穿透到下方的浮动 Cursor 窗口。
   const reparented = false;
-  log(`[Embed] Using floating window mode (transient + XShape) for pane: ${paneId}`);
+  log(`[Embed] Using floating window mode (transient + XShape) for sub-cursor: ${subCursorId}`);
   
   // 设置 WM_TRANSIENT_FOR：让窗口管理器始终将 Cursor 窗口保持在主窗口之上
   if (mainWindowId) {
     await setWindowTransientFor(windowId, mainWindowId);
   }
   
-  // 移动到屏幕绝对坐标（主窗口 contentBounds + pane 相对位置）
+  // 移动到屏幕绝对坐标（主窗口 contentBounds + sub-cursor 相对位置）
   const contentBounds = mainWindow.getContentBounds();
-  const screenX = contentBounds.x + paneBounds.x;
-  const screenY = contentBounds.y + paneBounds.y;
+  const screenX = contentBounds.x + subCursorBounds.x;
+  const screenY = contentBounds.y + subCursorBounds.y;
   
-  log(`Moving window to: (${screenX}, ${screenY}), size: ${paneBounds.width}x${paneBounds.height}`);
+  log(`Moving window to: (${screenX}, ${screenY}), size: ${subCursorBounds.width}x${subCursorBounds.height}`);
   
-  const moveResult = await moveResizeWindow(windowId, screenX, screenY, paneBounds.width, paneBounds.height);
+  const moveResult = await moveResizeWindow(windowId, screenX, screenY, subCursorBounds.width, subCursorBounds.height);
   if (!moveResult) {
     return { success: false, error: 'Failed to move/resize window' };
   }
   raiseWindowX11(windowId);
   
   // 保存窗口信息
-  embeddedWindows.set(paneId, { windowId, pid, reparented });
-  log(`[EMBED] Done: paneId=${paneId}, windowId=${windowId}, reparented=${reparented}, total=${embeddedWindows.size}`);
+  embeddedWindows.set(subCursorId, { windowId, pid, reparented });
+  log(`[EMBED] Done: subCursorId=${subCursorId}, windowId=${windowId}, reparented=${reparented}, total=${embeddedWindows.size}`);
   
   return { success: true, windowId };
 }
@@ -919,9 +921,9 @@ let resizeCallCount = 0;
 let lastDebugTime = 0;
 
 export async function resizeEmbeddedWindowLinux(
-  paneId: string,
+  subCursorId: string,
   mainWindow: BrowserWindow,
-  paneBounds: { x: number; y: number; width: number; height: number }
+  subCursorBounds: { x: number; y: number; width: number; height: number }
 ): Promise<boolean> {
   resizeCallCount++;
   
@@ -929,12 +931,12 @@ export async function resizeEmbeddedWindowLinux(
   const mapSize = embeddedWindows.size;
   const mapKeys = Array.from(embeddedWindows.keys());
   
-  const info = embeddedWindows.get(paneId);
+  const info = embeddedWindows.get(subCursorId);
   if (!info) {
     // 调试：每 500ms 打印一次
     const now = Date.now();
     if (now - lastDebugTime > 500) {
-      log(`[RESIZE] pane=${paneId} NOT FOUND! Map.size=${mapSize}, keys=[${mapKeys.join(',')}], call#${resizeCallCount}`);
+      log(`[RESIZE] subCursor=${subCursorId} NOT FOUND! Map.size=${mapSize}, keys=[${mapKeys.join(',')}], call#${resizeCallCount}`);
       lastDebugTime = now;
     }
     return false;
@@ -942,31 +944,31 @@ export async function resizeEmbeddedWindowLinux(
   
   // 找到了，打印确认
   if (resizeCallCount <= 3 || resizeCallCount % 100 === 0) {
-    log(`[RESIZE] FOUND pane=${paneId}, windowId=${info.windowId}, Map.size=${mapSize}`);
+    log(`[RESIZE] FOUND subCursor=${subCursorId}, windowId=${info.windowId}, Map.size=${mapSize}`);
   }
   
   const contentBounds = mainWindow.getContentBounds();
-  const screenX = contentBounds.x + paneBounds.x;
-  const screenY = contentBounds.y + paneBounds.y;
+  const screenX = contentBounds.x + subCursorBounds.x;
+  const screenY = contentBounds.y + subCursorBounds.y;
   
-  // 调试：每 500ms 打印一次 resize 信息（更频繁以便调试移动问题）
+  // 调试：每 500ms 打印一次 resize 信息
   const now = Date.now();
-  const lastInfo = lastResizeInfo.get(paneId);
+  const lastInfo = lastResizeInfo.get(subCursorId);
   const posChanged = !lastInfo || lastInfo.x !== screenX || lastInfo.y !== screenY;
   
   if (!lastInfo || now - lastInfo.time > 500 || (posChanged && now - lastInfo.time > 100)) {
-    log(`[resize] pane=${paneId}, windowId=${info.windowId}, mainWin=(${contentBounds.x},${contentBounds.y}), pane=(${paneBounds.x},${paneBounds.y}), screen=(${screenX},${screenY}), size=${paneBounds.width}x${paneBounds.height}`);
-    lastResizeInfo.set(paneId, { x: screenX, y: screenY, w: paneBounds.width, h: paneBounds.height, time: now });
+    log(`[resize] subCursor=${subCursorId}, windowId=${info.windowId}, mainWin=(${contentBounds.x},${contentBounds.y}), sc=(${subCursorBounds.x},${subCursorBounds.y}), screen=(${screenX},${screenY}), size=${subCursorBounds.width}x${subCursorBounds.height}`);
+    lastResizeInfo.set(subCursorId, { x: screenX, y: screenY, w: subCursorBounds.width, h: subCursorBounds.height, time: now });
   }
   
-  return moveResizeWindowSync(info.windowId, screenX, screenY, paneBounds.width, paneBounds.height);
+  return moveResizeWindowSync(info.windowId, screenX, screenY, subCursorBounds.width, subCursorBounds.height);
 }
 
 /**
  * 聚焦嵌入窗口
  */
-export async function focusEmbeddedWindowLinux(paneId: string): Promise<boolean> {
-  const info = embeddedWindows.get(paneId);
+export async function focusEmbeddedWindowLinux(subCursorId: string): Promise<boolean> {
+  const info = embeddedWindows.get(subCursorId);
   if (!info) return false;
   
   return focusWindow(info.windowId);
@@ -1014,11 +1016,11 @@ function killProcessTree(pid: number): void {
 /**
  * 关闭嵌入窗口并杀掉 Cursor 进程
  */
-export async function closeEmbeddedWindowLinux(paneId: string): Promise<boolean> {
-  const info = embeddedWindows.get(paneId);
+export async function closeEmbeddedWindowLinux(subCursorId: string): Promise<boolean> {
+  const info = embeddedWindows.get(subCursorId);
   if (!info) return false;
   
-  log(`[Close] Closing pane=${paneId}, windowId=${info.windowId}`);
+  log(`[Close] Closing subCursor=${subCursorId}, windowId=${info.windowId}`);
   
   // 1. 获取实际的 Cursor 进程 PID（在关窗口之前，否则窗口没了就拿不到了）
   const pid = await getWindowPid(info.windowId);
@@ -1032,25 +1034,25 @@ export async function closeEmbeddedWindowLinux(paneId: string): Promise<boolean>
   }
   
   // 4. 清理跟踪状态
-  embeddedWindows.delete(paneId);
+  embeddedWindows.delete(subCursorId);
   knownCursorWindowIds.delete(info.windowId);
   rejectedSmallWindows.delete(info.windowId);
   
-  log(`[Close] Done: pane=${paneId}, pid=${pid}, remaining=${embeddedWindows.size}`);
+  log(`[Close] Done: subCursor=${subCursorId}, pid=${pid}, remaining=${embeddedWindows.size}`);
   return result;
 }
 
 /**
  * 获取嵌入窗口信息
  */
-export function getEmbeddedWindowInfo(paneId: string): LinuxWindowInfo | undefined {
-  return embeddedWindows.get(paneId);
+export function getEmbeddedWindowInfo(subCursorId: string): LinuxWindowInfo | undefined {
+  return embeddedWindows.get(subCursorId);
 }
 
 /**
- * 获取所有嵌入窗口的 pane ID
+ * 获取所有嵌入窗口的 sub-cursor ID
  */
-export function getAllEmbeddedPaneIds(): string[] {
+export function getAllEmbeddedSubCursorIds(): string[] {
   return Array.from(embeddedWindows.keys());
 }
 
@@ -1150,13 +1152,13 @@ export async function isLinuxEmbedSupported(): Promise<boolean> {
  * 清理所有嵌入窗口（异步版）
  */
 export async function cleanupAllWindows(): Promise<void> {
-  for (const [paneId, info] of embeddedWindows) {
+  for (const [scId, info] of embeddedWindows) {
     try {
       const pid = await getWindowPid(info.windowId);
       await closeWindow(info.windowId);
       if (pid) killProcessTree(pid);
     } catch (e) {
-      console.error(`[Linux] Failed to close window for pane ${paneId}:`, e);
+      console.error(`[Linux] Failed to close window for subCursor ${scId}:`, e);
     }
   }
   embeddedWindows.clear();
@@ -1220,6 +1222,100 @@ export function cleanupAllWindowsSync(): void {
 /**
  * 删除嵌入窗口记录（不关闭窗口）
  */
-export function removeEmbeddedWindow(paneId: string): void {
-  embeddedWindows.delete(paneId);
+export function removeEmbeddedWindow(subCursorId: string): void {
+  embeddedWindows.delete(subCursorId);
+}
+
+/**
+ * 使用 X11 XChangeProperty 设置窗口图标（_NET_WM_ICON）
+ * 这是 Electron frame:false 在 Linux 上不设置图标的 workaround。
+ * 使用 koffi + libX11，不需要任何 Python 依赖。
+ * 
+ * @param windowId X11 窗口 ID
+ * @param iconPath PNG 图标文件路径
+ * @returns 是否成功
+ */
+export function setWindowIconX11(windowId: number, iconPath: string): boolean {
+  if (!initX11() || !x11 || !x11Display || !koffi) {
+    log('[Icon] X11 not available for setWindowIcon');
+    return false;
+  }
+
+  try {
+    const { nativeImage } = require('electron');
+    const iconImage = nativeImage.createFromPath(iconPath);
+    if (iconImage.isEmpty()) {
+      log('[Icon] Failed to load icon image:', iconPath);
+      return false;
+    }
+
+    // 生成多种尺寸的图标数据
+    const sizes = [16, 32, 48, 64, 128];
+    const iconDataArray: number[] = [];
+
+    for (const s of sizes) {
+      const resized = iconImage.resize({ width: s, height: s });
+      const bitmap = resized.toBitmap();
+      // toBitmap() 返回 BGRA 格式的 Buffer
+      
+      iconDataArray.push(s); // width
+      iconDataArray.push(s); // height
+      
+      for (let i = 0; i < s * s; i++) {
+        const offset = i * 4;
+        const b = bitmap[offset];
+        const g = bitmap[offset + 1];
+        const r = bitmap[offset + 2];
+        const a = bitmap[offset + 3];
+        // _NET_WM_ICON 需要 ARGB 格式的 32 位值
+        const pixel = ((a & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+        // 使用无符号值
+        iconDataArray.push(pixel >>> 0);
+      }
+    }
+
+    log(`[Icon] Prepared ${iconDataArray.length} values for _NET_WM_ICON`);
+
+    // 创建 Buffer：在 64 位系统上 XChangeProperty format=32 使用 long（8 字节）
+    const is64 = is64BitUnix();
+    const elemSize = is64 ? 8 : 4;
+    const buf = Buffer.alloc(iconDataArray.length * elemSize);
+
+    for (let i = 0; i < iconDataArray.length; i++) {
+      if (is64) {
+        // 写为 64 位 unsigned long
+        buf.writeBigUInt64LE(BigInt(iconDataArray[i]), i * 8);
+      } else {
+        buf.writeUInt32LE(iconDataArray[i], i * 4);
+      }
+    }
+
+    const atomNetWmIcon = getAtom('_NET_WM_ICON');
+    const atomCardinal = getAtom('CARDINAL');
+
+    if (atomNetWmIcon === 0n || atomCardinal === 0n) {
+      log('[Icon] Failed to get atoms');
+      return false;
+    }
+
+    // XChangeProperty(display, window, property, type, format, mode, data, nelements)
+    // mode: PropModeReplace = 0, format: 32
+    x11.XChangeProperty(
+      x11Display,
+      windowId,
+      Number(atomNetWmIcon),
+      Number(atomCardinal),
+      32,     // format
+      0,      // PropModeReplace
+      buf,
+      iconDataArray.length
+    );
+
+    x11.XFlush(x11Display);
+    log(`[Icon] Successfully set _NET_WM_ICON on window ${windowId} (${iconDataArray.length} values)`);
+    return true;
+  } catch (e: any) {
+    log('[Icon] setWindowIconX11 error:', e?.message || String(e));
+    return false;
+  }
 }

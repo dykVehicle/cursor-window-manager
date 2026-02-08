@@ -36,7 +36,7 @@
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
   
-  --pane-min-size: 150px;
+  --sub-cursor-min-size: 150px;
 }
 
 * {

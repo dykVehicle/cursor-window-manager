@@ -6,8 +6,8 @@ export type WindowLayout = string | {
   splitPercentage?: number;
 };
 
-// 单个窗格的配置
-export interface PaneConfig {
+// 单个 Sub Cursor 的配置
+export interface SubCursorConfig {
   id: string;
   folderPath?: string;
   label?: string;
@@ -20,7 +20,7 @@ export interface SavedLayout {
   id: string;
   name: string;
   layout: WindowLayout;
-  panes: Record<string, PaneConfig>;
+  subCursors: Record<string, SubCursorConfig>;
   createdAt: number;
 }
 
@@ -41,25 +41,25 @@ export interface DetectCursorResult {
 export interface ElectronAPI {
   getLayout: () => Promise<WindowLayout>;
   saveLayout: (layout: WindowLayout) => Promise<boolean>;
-  getPanes: () => Promise<Record<string, PaneConfig>>;
-  savePanes: (panes: Record<string, PaneConfig>) => Promise<boolean>;
+  getSubCursors: () => Promise<Record<string, SubCursorConfig>>;
+  saveSubCursors: (subCursors: Record<string, SubCursorConfig>) => Promise<boolean>;
   getCursorPath: () => Promise<string>;
   setCursorPath: (path: string) => Promise<boolean>;
   detectCursorPath: () => Promise<DetectCursorResult>;
   validateCursorPath: (path: string) => Promise<boolean>;
   selectCursorFile: () => Promise<string | null>;
-  openCursor: (paneId: string, folderPath?: string, paneBounds?: { x: number; y: number; width: number; height: number }) => Promise<OpenCursorResult>;
-  resizeEmbeddedWindow: (paneId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<boolean>;
-  focusEmbeddedWindow: (paneId: string) => Promise<boolean>;
+  openCursor: (subCursorId: string, folderPath?: string, subCursorBounds?: { x: number; y: number; width: number; height: number }) => Promise<OpenCursorResult>;
+  resizeEmbeddedWindow: (subCursorId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<boolean>;
+  focusEmbeddedWindow: (subCursorId: string) => Promise<boolean>;
   isEmbedSupported: () => Promise<boolean>;
-  onCursorEmbedded: (callback: (paneId: string, hwnd: number) => void) => void;
-  closeCursor: (paneId: string) => Promise<boolean>;
+  onCursorEmbedded: (callback: (subCursorId: string, hwnd: number) => void) => void;
+  closeCursor: (subCursorId: string) => Promise<boolean>;
   selectFolder: () => Promise<string | null>;
   getConfig: () => Promise<unknown>;
   resetConfig: () => Promise<boolean>;
   openExternal: (url: string) => Promise<void>;
-  onCursorClosed: (callback: (paneId: string) => void) => void;
-  onCursorError: (callback: (paneId: string, error: string) => void) => void;
+  onCursorClosed: (callback: (subCursorId: string) => void) => void;
+  onCursorError: (callback: (subCursorId: string, error: string) => void) => void;
   onWindowMoved: (callback: () => void) => void;
   onWindowFocused: (callback: () => void) => void;
   removeAllListeners: (channel: string) => void;
@@ -67,7 +67,7 @@ export interface ElectronAPI {
   openLogFolder: () => Promise<boolean>;
   // 布局收藏功能
   getSavedLayouts: () => Promise<SavedLayout[]>;
-  saveLayoutAs: (name: string, layout: WindowLayout, panes: Record<string, PaneConfig>) => Promise<SavedLayout>;
+  saveLayoutAs: (name: string, layout: WindowLayout, subCursors: Record<string, SubCursorConfig>) => Promise<SavedLayout>;
   deleteSavedLayout: (id: string) => Promise<boolean>;
   renameSavedLayout: (id: string, name: string) => Promise<boolean>;
   // 窗口控制
@@ -79,7 +79,7 @@ export interface ElectronAPI {
   // 隐藏/显示嵌入窗口
   hideAllEmbeddedWindows: () => Promise<void>;
   showAllEmbeddedWindows: () => Promise<void>;
-  showEmbeddedWindow: (paneId: string) => Promise<void>;
+  showEmbeddedWindow: (subCursorId: string) => Promise<void>;
   // 关闭前保存状态
   onSaveStateBeforeClose: (callback: () => void) => void;
   // 通知主进程状态已保存

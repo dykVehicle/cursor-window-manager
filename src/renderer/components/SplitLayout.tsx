@@ -1,67 +1,67 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
-import { WindowLayout, PaneConfig } from '../types';
-import Pane from './Pane';
+import { WindowLayout, SubCursorConfig } from '../types';
+import SubCursor from './SubCursor';
 
 interface SplitLayoutProps {
   layout: WindowLayout;
-  panes: Record<string, PaneConfig>;
+  subCursors: Record<string, SubCursorConfig>;
   onLayoutChange: (layout: WindowLayout) => void;
-  onOpenCursor: (paneId: string, bounds: { x: number; y: number; width: number; height: number }) => void;
-  onCloseCursor: (paneId: string) => void;
-  onSelectFolder: (paneId: string) => void;
-  onClearFolder: (paneId: string) => void;
-  onRemovePane: (paneId: string) => void;
-  onUpdatePane: (paneId: string, config: Partial<PaneConfig>) => void;
-  onSplitPane?: (paneId: string, direction: 'up' | 'down' | 'left' | 'right') => void;
-  maximizedPaneId?: string | null;
-  onToggleMaximize?: (paneId: string) => void;
+  onOpenCursor: (subCursorId: string, bounds: { x: number; y: number; width: number; height: number }) => void;
+  onCloseCursor: (subCursorId: string) => void;
+  onSelectFolder: (subCursorId: string) => void;
+  onClearFolder: (subCursorId: string) => void;
+  onRemoveSubCursor: (subCursorId: string) => void;
+  onUpdateSubCursor: (subCursorId: string, config: Partial<SubCursorConfig>) => void;
+  onSplitSubCursor?: (subCursorId: string, direction: 'up' | 'down' | 'left' | 'right') => void;
+  maximizedSubCursorId?: string | null;
+  onToggleMaximize?: (subCursorId: string) => void;
 }
 
 interface SplitContainerProps extends SplitLayoutProps {
   parentLayout?: WindowLayout;
   position?: 'first' | 'second';
   onUpdateSplit?: (percentage: number) => void;
-  onSplitPane?: (paneId: string, direction: 'up' | 'down' | 'left' | 'right') => void;
+  onSplitSubCursor?: (subCursorId: string, direction: 'up' | 'down' | 'left' | 'right') => void;
 }
 
 function SplitLayout(props: SplitLayoutProps) {
-  const { layout, onSplitPane, maximizedPaneId, onToggleMaximize } = props;
+  const { layout, onSplitSubCursor, maximizedSubCursorId, onToggleMaximize } = props;
 
-  // 如果有 pane 被最大化，只渲染那个 pane
-  if (maximizedPaneId) {
+  // 如果有 sub-cursor 被最大化，只渲染那个 sub-cursor
+  if (maximizedSubCursorId) {
     return (
       <div className="split-pane maximized" style={{ flex: 1 }}>
-        <Pane
-          paneId={maximizedPaneId}
-          config={props.panes[maximizedPaneId] || { id: maximizedPaneId }}
-          onOpenCursor={(bounds) => props.onOpenCursor(maximizedPaneId, bounds)}
-          onCloseCursor={() => props.onCloseCursor(maximizedPaneId)}
-          onSelectFolder={() => props.onSelectFolder(maximizedPaneId)}
-          onClearFolder={() => props.onClearFolder(maximizedPaneId)}
-          onRemove={() => props.onRemovePane(maximizedPaneId)}
-          onUpdateLabel={(label) => props.onUpdatePane(maximizedPaneId, { label })}
-          onSplit={onSplitPane ? (dir) => onSplitPane(maximizedPaneId, dir) : undefined}
+        <SubCursor
+          subCursorId={maximizedSubCursorId}
+          config={props.subCursors[maximizedSubCursorId] || { id: maximizedSubCursorId }}
+          onOpenCursor={(bounds) => props.onOpenCursor(maximizedSubCursorId, bounds)}
+          onCloseCursor={() => props.onCloseCursor(maximizedSubCursorId)}
+          onSelectFolder={() => props.onSelectFolder(maximizedSubCursorId)}
+          onClearFolder={() => props.onClearFolder(maximizedSubCursorId)}
+          onRemove={() => props.onRemoveSubCursor(maximizedSubCursorId)}
+          onUpdateLabel={(label) => props.onUpdateSubCursor(maximizedSubCursorId, { label })}
+          onSplit={onSplitSubCursor ? (dir) => onSplitSubCursor(maximizedSubCursorId, dir) : undefined}
           isMaximized={true}
-          onToggleMaximize={onToggleMaximize ? () => onToggleMaximize(maximizedPaneId) : undefined}
+          onToggleMaximize={onToggleMaximize ? () => onToggleMaximize(maximizedSubCursorId) : undefined}
         />
       </div>
     );
   }
 
-  // 如果是单个窗格
+  // 如果是单个 sub-cursor
   if (typeof layout === 'string') {
     return (
       <div className="split-pane" style={{ flex: 1 }}>
-        <Pane
-          paneId={layout}
-          config={props.panes[layout] || { id: layout }}
+        <SubCursor
+          subCursorId={layout}
+          config={props.subCursors[layout] || { id: layout }}
           onOpenCursor={(bounds) => props.onOpenCursor(layout, bounds)}
           onCloseCursor={() => props.onCloseCursor(layout)}
           onSelectFolder={() => props.onSelectFolder(layout)}
           onClearFolder={() => props.onClearFolder(layout)}
-          onRemove={() => props.onRemovePane(layout)}
-          onUpdateLabel={(label) => props.onUpdatePane(layout, { label })}
-          onSplit={onSplitPane ? (dir) => onSplitPane(layout, dir) : undefined}
+          onRemove={() => props.onRemoveSubCursor(layout)}
+          onUpdateLabel={(label) => props.onUpdateSubCursor(layout, { label })}
+          onSplit={onSplitSubCursor ? (dir) => onSplitSubCursor(layout, dir) : undefined}
           isMaximized={false}
           onToggleMaximize={onToggleMaximize ? () => onToggleMaximize(layout) : undefined}
         />
@@ -77,36 +77,36 @@ function SplitLayout(props: SplitLayoutProps) {
 
 function SplitContainer({
   layout,
-  panes,
+  subCursors,
   onLayoutChange,
   onOpenCursor,
   onCloseCursor,
   onSelectFolder,
   onClearFolder,
-  onRemovePane,
-  onUpdatePane,
-  onSplitPane,
-  maximizedPaneId,
+  onRemoveSubCursor,
+  onUpdateSubCursor,
+  onSplitSubCursor,
+  maximizedSubCursorId,
   onToggleMaximize,
 }: SplitContainerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [splitPercentage, setSplitPercentage] = useState(50);
 
-  // 如果是字符串，直接渲染Pane
+  // 如果是字符串，直接渲染 SubCursor
   if (typeof layout === 'string') {
     return (
       <div className="split-pane" style={{ flex: 1 }}>
-        <Pane
-          paneId={layout}
-          config={panes[layout] || { id: layout }}
+        <SubCursor
+          subCursorId={layout}
+          config={subCursors[layout] || { id: layout }}
           onOpenCursor={(bounds) => onOpenCursor(layout, bounds)}
           onCloseCursor={() => onCloseCursor(layout)}
           onSelectFolder={() => onSelectFolder(layout)}
           onClearFolder={() => onClearFolder(layout)}
-          onRemove={() => onRemovePane(layout)}
-          onUpdateLabel={(label) => onUpdatePane(layout, { label })}
-          onSplit={onSplitPane ? (dir) => onSplitPane(layout, dir) : undefined}
+          onRemove={() => onRemoveSubCursor(layout)}
+          onUpdateLabel={(label) => onUpdateSubCursor(layout, { label })}
+          onSplit={onSplitSubCursor ? (dir) => onSplitSubCursor(layout, dir) : undefined}
           isMaximized={false}
           onToggleMaximize={onToggleMaximize ? () => onToggleMaximize(layout) : undefined}
         />
@@ -193,16 +193,16 @@ function SplitContainer({
       >
         <SplitLayout
           layout={first}
-          panes={panes}
+          subCursors={subCursors}
           onLayoutChange={handleFirstLayoutChange}
           onOpenCursor={onOpenCursor}
           onCloseCursor={onCloseCursor}
           onSelectFolder={onSelectFolder}
           onClearFolder={onClearFolder}
-          onRemovePane={onRemovePane}
-          onUpdatePane={onUpdatePane}
-          onSplitPane={onSplitPane}
-          maximizedPaneId={maximizedPaneId}
+          onRemoveSubCursor={onRemoveSubCursor}
+          onUpdateSubCursor={onUpdateSubCursor}
+          onSplitSubCursor={onSplitSubCursor}
+          maximizedSubCursorId={maximizedSubCursorId}
           onToggleMaximize={onToggleMaximize}
         />
       </div>
@@ -220,16 +220,16 @@ function SplitContainer({
       >
         <SplitLayout
           layout={second}
-          panes={panes}
+          subCursors={subCursors}
           onLayoutChange={handleSecondLayoutChange}
           onOpenCursor={onOpenCursor}
           onCloseCursor={onCloseCursor}
           onSelectFolder={onSelectFolder}
           onClearFolder={onClearFolder}
-          onRemovePane={onRemovePane}
-          onUpdatePane={onUpdatePane}
-          onSplitPane={onSplitPane}
-          maximizedPaneId={maximizedPaneId}
+          onRemoveSubCursor={onRemoveSubCursor}
+          onUpdateSubCursor={onUpdateSubCursor}
+          onSplitSubCursor={onSplitSubCursor}
+          maximizedSubCursorId={maximizedSubCursorId}
           onToggleMaximize={onToggleMaximize}
         />
       </div>

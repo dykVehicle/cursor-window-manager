@@ -6,8 +6,8 @@ export type WindowLayout = string | {
   splitPercentage?: number;
 };
 
-// 单个窗格的配置
-export interface PaneConfig {
+// 单个 Sub Cursor 的配置
+export interface SubCursorConfig {
   id: string;
   folderPath?: string;
   label?: string;
@@ -26,7 +26,7 @@ export interface WindowBounds {
 // 应用配置
 export interface AppConfig {
   layout: WindowLayout;
-  panes: Record<string, PaneConfig>;
+  subCursors: Record<string, SubCursorConfig>;
   windowBounds: WindowBounds;
   cursorPath: string;
 }

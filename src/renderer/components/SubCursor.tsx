@@ -1,13 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { PaneConfig } from '../types';
+import { SubCursorConfig } from '../types';
 
 // 调试开关 - 生产环境关闭
 const DEBUG = false;
 const log = DEBUG ? console.log.bind(console) : () => {};
 
-interface PaneProps {
-  paneId: string;
-  config: PaneConfig;
+interface SubCursorProps {
+  subCursorId: string;
+  config: SubCursorConfig;
   onOpenCursor: (bounds: { x: number; y: number; width: number; height: number }) => void;
   onCloseCursor: () => void;
   onSelectFolder: () => void;
@@ -19,8 +19,8 @@ interface PaneProps {
   onToggleMaximize?: () => void;
 }
 
-function Pane({
-  paneId,
+function SubCursor({
+  subCursorId,
   config,
   onOpenCursor,
   onCloseCursor,
@@ -31,25 +31,25 @@ function Pane({
   onSplit,
   isMaximized = false,
   onToggleMaximize,
-}: PaneProps) {
+}: SubCursorProps) {
   const [isEditingLabel, setIsEditingLabel] = useState(false);
   const [labelInput, setLabelInput] = useState(config.label || '');
   const [isEmbedded, setIsEmbedded] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const paneRef = useRef<HTMLDivElement>(null); // 整个 pane 的 ref
+  const subCursorRef = useRef<HTMLDivElement>(null); // 整个 sub-cursor 的 ref
   const contentRef = useRef<HTMLDivElement>(null);
   
-  // 获取窗格内容区域的坐标（相对于父窗口客户区）
+  // 获取内容区域的坐标（相对于父窗口客户区）
   // 使用 Owner 模式浮动窗口，坐标是相对于父窗口的
   // 返回 CSS 像素，主进程会处理 DPI 缩放转换
-  const getPaneBounds = useCallback(() => {
+  const getSubCursorBounds = useCallback(() => {
     if (contentRef.current) {
       // 直接使用 content 区域的位置
       const contentRect = contentRef.current.getBoundingClientRect();
       // 同时传递 devicePixelRatio 给主进程统一处理
       const dpr = window.devicePixelRatio || 1;
-      log('[getPaneBounds] DPI scale factor:', dpr);
-      log('[getPaneBounds] CSS pixels:', contentRect.left, contentRect.top, contentRect.width, contentRect.height);
+      log('[getSubCursorBounds] DPI scale factor:', dpr);
+      log('[getSubCursorBounds] CSS pixels:', contentRect.left, contentRect.top, contentRect.width, contentRect.height);
       
       return {
         x: Math.round(contentRect.left),
@@ -64,26 +64,26 @@ function Pane({
   
   // 处理打开Cursor
   const handleOpenCursor = useCallback(() => {
-    const bounds = getPaneBounds();
+    const bounds = getSubCursorBounds();
     log('Opening Cursor with bounds:', bounds);
     onOpenCursor(bounds);
-  }, [getPaneBounds, onOpenCursor]);
+  }, [getSubCursorBounds, onOpenCursor]);
   
   // 监听嵌入成功事件
   useEffect(() => {
-    const handleEmbedded = (embeddedPaneId: string) => {
-      log('[Pane] Received cursor-embedded event:', embeddedPaneId, 'my paneId:', paneId);
-      if (embeddedPaneId === paneId) {
-        log('[Pane] Setting isEmbedded to true');
+    const handleEmbedded = (embeddedSubCursorId: string) => {
+      log('[SubCursor] Received cursor-embedded event:', embeddedSubCursorId, 'my subCursorId:', subCursorId);
+      if (embeddedSubCursorId === subCursorId) {
+        log('[SubCursor] Setting isEmbedded to true');
         setIsEmbedded(true);
         
         // 嵌入成功后多次调整大小，确保 CSS 变化（embedded 类移除 padding）后坐标正确
         // 使用更多次数和更长时间间隔来确保完美贴合
         const adjustSize = (delay: number) => {
           setTimeout(() => {
-            const bounds = getPaneBounds();
-            log(`[Pane] Resize after embed (${delay}ms):`, bounds);
-            window.electronAPI.resizeEmbeddedWindow(paneId, bounds);
+            const bounds = getSubCursorBounds();
+            log(`[SubCursor] Resize after embed (${delay}ms):`, bounds);
+            window.electronAPI.resizeEmbeddedWindow(subCursorId, bounds);
           }, delay);
         };
         // 多次调整确保完美贴合
@@ -101,13 +101,13 @@ function Pane({
     return () => {
       // 注意：IPC 监听器需要手动移除
     };
-  }, [paneId, getPaneBounds]);
+  }, [subCursorId, getSubCursorBounds]);
   
-  // 监听窗格大小变化，更新嵌入窗口大小
-  // 注意：window-moved 事件在 App.tsx 中统一处理，避免多个 Pane 的 removeAllListeners 相互干扰
+  // 监听大小变化，更新嵌入窗口大小
+  // 注意：window-moved 事件在 App.tsx 中统一处理，避免多个 SubCursor 的 removeAllListeners 相互干扰
   useEffect(() => {
     // 只要 Cursor 在运行就监听 resize
-    if (!config.isRunning || !paneRef.current) return;
+    if (!config.isRunning || !subCursorRef.current) return;
     
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     let lastBounds = { x: 0, y: 0, width: 0, height: 0 };
@@ -117,7 +117,7 @@ function Pane({
       if (isResizing) return;
       isResizing = true;
       
-      const bounds = getPaneBounds();
+      const bounds = getSubCursorBounds();
       // 使用更小的阈值确保精确贴合（1 像素）
       const threshold = 1;
       const changed = Math.abs(bounds.width - lastBounds.width) > threshold || 
@@ -127,7 +127,7 @@ function Pane({
       
       if (changed) {
         lastBounds = { ...bounds };
-        window.electronAPI.resizeEmbeddedWindow(paneId, bounds);
+        window.electronAPI.resizeEmbeddedWindow(subCursorId, bounds);
       }
       
       isResizing = false;
@@ -141,9 +141,9 @@ function Pane({
       debounceTimer = setTimeout(doResize, 50);
     };
     
-    // 使用 ResizeObserver 监听整个 pane 的大小变化
+    // 使用 ResizeObserver 监听整个 sub-cursor 的大小变化
     const resizeObserver = new ResizeObserver(handleResize);
-    resizeObserver.observe(paneRef.current);
+    resizeObserver.observe(subCursorRef.current);
     
     // 同时监听窗口 resize
     window.addEventListener('resize', handleResize);
@@ -165,9 +165,9 @@ function Pane({
       window.removeEventListener('resize', handleResize);
       window.electronAPI.removeAllListeners('window-maximized-change');
     };
-  }, [config.isRunning, paneId, getPaneBounds]);
+  }, [config.isRunning, subCursorId, getSubCursorBounds]);
 
-  const displayName = config.label || paneId;
+  const displayName = config.label || subCursorId;
   const isRunning = config.isRunning;
 
   const handleLabelSubmit = () => {
@@ -215,7 +215,7 @@ function Pane({
   };
 
   return (
-    <div className={`pane ${isEmbedded ? 'has-embedded' : ''}`} ref={paneRef} data-pane-id={paneId} onContextMenu={handleContextMenu}>
+    <div className={`sub-cursor ${isEmbedded ? 'has-embedded' : ''}`} ref={subCursorRef} data-sub-cursor-id={subCursorId} onContextMenu={handleContextMenu}>
       {/* 右键菜单 */}
       {contextMenu && onSplit && (
         <div 
@@ -242,8 +242,8 @@ function Pane({
           </div>
         </div>
       )}
-      {/* 窗格头部 */}
-      <div className="pane-header">
+      {/* 头部 */}
+      <div className="sub-cursor-header">
         {isEditingLabel ? (
           <input
             type="text"
@@ -263,7 +263,7 @@ function Pane({
           />
         ) : (
           <span
-            className="pane-title"
+            className="sub-cursor-title"
             onDoubleClick={() => setIsEditingLabel(true)}
             title="双击编辑名称"
           >
@@ -273,7 +273,7 @@ function Pane({
 
         {/* 运行状态 */}
         {isRunning && (
-          <span className="pane-status running">
+          <span className="sub-cursor-status running">
             <span className="status-dot" />
             运行中
           </span>
@@ -285,7 +285,7 @@ function Pane({
             <button
               className="icon-button"
               onClick={onToggleMaximize}
-              data-tooltip={isMaximized ? "还原窗格" : "最大化窗格"}
+              data-tooltip={isMaximized ? "还原" : "最大化"}
             >
               {isMaximized ? <RestoreIcon /> : <MaximizeIcon />}
             </button>
@@ -300,24 +300,22 @@ function Pane({
           <button
             className="icon-button danger"
             onClick={onRemove}
-            data-tooltip="删除窗格"
+            data-tooltip="删除"
           >
             <CloseIcon />
           </button>
         </div>
       </div>
 
-      {/* 窗格内容 - 这是嵌入Cursor窗口的区域 */}
+      {/* 内容 - 这是嵌入Cursor窗口的区域 */}
       <div 
-        className={`pane-content ${isEmbedded ? 'embedded' : ''}`} 
+        className={`sub-cursor-content ${isEmbedded ? 'embedded' : ''}`} 
         ref={contentRef}
         onClick={() => {
           // 点击时设置焦点到嵌入的窗口
-          // 使用 onClick 而不是 onMouseDown，因为嵌入窗口是 WS_CHILD
-          // 用户的点击会先传递给子窗口，只有点击到空白区域才会触发这里
           if (isEmbedded && config.isRunning) {
-            log('[Pane] Click - focusing embedded window:', paneId);
-            window.electronAPI.focusEmbeddedWindow(paneId);
+            log('[SubCursor] Click - focusing embedded window:', subCursorId);
+            window.electronAPI.focusEmbeddedWindow(subCursorId);
           }
         }}
       >
@@ -325,14 +323,14 @@ function Pane({
           // Cursor已嵌入，显示空白区域（Cursor窗口会覆盖这里）
           null // 不需要任何内容，Cursor窗口会覆盖
         ) : isRunning ? (
-          <div className="pane-running-info">
-            <CursorIcon className="pane-running-icon" />
-            <span className="pane-running-text">Cursor 正在运行</span>
+          <div className="sub-cursor-running-info">
+            <CursorIcon className="sub-cursor-running-icon" />
+            <span className="sub-cursor-running-text">Cursor 正在运行</span>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
               (嵌入中...)
             </span>
             {config.folderPath && (
-              <div className="pane-folder-info">
+              <div className="sub-cursor-folder-info">
                 <FolderOpenIcon />
                 <span title={config.folderPath}>{getFolderName(config.folderPath)}</span>
               </div>
@@ -344,9 +342,9 @@ function Pane({
           </div>
         ) : (
           <>
-            <div className="pane-placeholder">
-              <CursorIcon className="pane-placeholder-icon" />
-              <p className="pane-placeholder-text">
+            <div className="sub-cursor-placeholder">
+              <CursorIcon className="sub-cursor-placeholder-icon" />
+              <p className="sub-cursor-placeholder-text">
                 {config.folderPath
                   ? '点击启动按钮打开 Cursor'
                   : '选择一个文件夹，然后启动 Cursor'}
@@ -354,7 +352,7 @@ function Pane({
             </div>
 
             {config.folderPath && (
-              <div className="pane-folder-info">
+              <div className="sub-cursor-folder-info">
                 <FolderOpenIcon />
                 <span title={config.folderPath}>{getFolderName(config.folderPath)}</span>
                 <button 
@@ -367,7 +365,7 @@ function Pane({
               </div>
             )}
 
-            <div className="pane-actions">
+            <div className="sub-cursor-actions">
               {!config.folderPath && (
                 <button className="btn-secondary" onClick={onSelectFolder}>
                   <FolderIcon />
@@ -503,4 +501,4 @@ function SplitRightIcon() {
   );
 }
 
-export default Pane;
+export default SubCursor;

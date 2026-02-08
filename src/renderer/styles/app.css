@@ -147,8 +147,8 @@
   height: 18px;
 }
 
-/* 窗格组件 */
-.pane {
+/* Sub Cursor 组件 */
+.sub-cursor {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -158,12 +158,12 @@
 }
 
 /* 当有嵌入窗口时，移除所有间距 */
-.pane.has-embedded {
+.sub-cursor.has-embedded {
   border-radius: 0;
   box-shadow: none;
 }
 
-.pane-header {
+.sub-cursor-header {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -174,7 +174,7 @@
   font-size: 11px;
 }
 
-.pane-title {
+.sub-cursor-title {
   flex: 1;
   font-size: 13px;
   font-weight: 500;
@@ -184,13 +184,13 @@
   text-overflow: ellipsis;
 }
 
-.pane-path {
+.sub-cursor-path {
   font-size: 11px;
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
 
-.pane-status {
+.sub-cursor-status {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -198,22 +198,22 @@
   color: var(--text-secondary);
 }
 
-.pane-status.running {
+.sub-cursor-status.running {
   color: var(--accent-primary);
 }
 
-.pane-status .status-dot {
+.sub-cursor-status .status-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: currentColor;
 }
 
-.pane-status.running .status-dot {
+.sub-cursor-status.running .status-dot {
   animation: pulse 2s ease-in-out infinite;
 }
 
-.pane-content {
+.sub-cursor-content {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -226,7 +226,7 @@
 }
 
 /* 当嵌入窗口时，移除所有边距让窗口完美填满 */
-.pane-content.embedded {
+.sub-cursor-content.embedded {
   padding: 0 !important;
   margin: 0 !important;
   align-items: stretch;
@@ -237,7 +237,7 @@
   outline: none;
 }
 
-.pane-placeholder {
+.sub-cursor-placeholder {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -246,46 +246,46 @@
   text-align: center;
 }
 
-.pane-placeholder-icon {
+.sub-cursor-placeholder-icon {
   width: 48px;
   height: 48px;
   color: var(--text-muted);
   opacity: 0.5;
 }
 
-.pane-placeholder-text {
+.sub-cursor-placeholder-text {
   font-size: 13px;
   max-width: 200px;
 }
 
-.pane-actions {
+.sub-cursor-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   justify-content: center;
 }
 
-.pane-running-info {
+.sub-cursor-running-info {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 16px;
 }
 
-.pane-running-icon {
+.sub-cursor-running-icon {
   width: 64px;
   height: 64px;
   color: var(--accent-primary);
   animation: pulse 2s ease-in-out infinite;
 }
 
-.pane-running-text {
+.sub-cursor-running-text {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
-.pane-folder-info {
+.sub-cursor-folder-info {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -299,12 +299,12 @@
   overflow: hidden;
 }
 
-.pane-folder-info svg {
+.sub-cursor-folder-info svg {
   flex-shrink: 0;
   color: var(--accent-orange);
 }
 
-.pane-folder-info span {
+.sub-cursor-folder-info span {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -346,8 +346,8 @@
 
 .split-pane {
   overflow: hidden;
-  min-width: var(--pane-min-size);
-  min-height: var(--pane-min-size);
+  min-width: var(--sub-cursor-min-size);
+  min-height: var(--sub-cursor-min-size);
   height: 100%; /* 确保填满父容器高度 */
   display: flex;
   flex-direction: column;
